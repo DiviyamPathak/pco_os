@@ -11,6 +11,7 @@ global get_idtr_base
 global set_idt_gate_asm
 global set_idtr_asm
 global frame_qword_asm
+global store_qword_asm
 global get_isr0_addr
 global get_isr8_addr
 global get_isr13_addr
@@ -153,6 +154,10 @@ set_idtr_asm:
 
 frame_qword_asm:
     mov rax, [rdi + rsi * 8]
+    ret
+
+store_qword_asm:
+    mov [rdi + rsi * 8], rdx
     ret
 
 get_isr0_addr:
