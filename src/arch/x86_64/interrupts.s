@@ -5,7 +5,22 @@ global load_idt
 global load_idt_local
 global arch_init
 global read_cr2
+global read_cr3
+global load_cr3
 global read_apic_id
+global cpu_has_apic
+global read_msr_asm
+global write_msr_asm
+global load_dword_asm
+global store_dword_asm
+global outb_asm
+global enable_interrupts
+global disable_interrupts
+global halt_cpu
+global wait_for_interrupt
+global set_lapic_eoi_reg_asm
+global read_timer_irq_count_asm
+global clear_timer_irq_count_asm
 global get_idt_base
 global get_idtr_base
 global set_idt_gate_asm
@@ -16,10 +31,12 @@ global get_isr0_addr
 global get_isr8_addr
 global get_isr13_addr
 global get_isr14_addr
+global get_isr32_addr
 global isr0
 global isr8
 global isr13
 global isr14
+global isr32
 global trigger_interrupt0
 global trigger_divide_error
 global trigger_general_protection
@@ -112,6 +129,15 @@ read_cr2:
     mov rax, cr2
     ret
 
+read_cr3:
+    mov rax, cr3
+    ret
+
+load_cr3:
+    mov rax, rdi
+    mov cr3, rax
+    ret
+
 read_apic_id:
     push rbx
     mov eax, 1
@@ -119,6 +145,75 @@ read_apic_id:
     shr ebx, 24
     mov eax, ebx
     pop rbx
+    ret
+
+cpu_has_apic:
+    push rbx
+    mov eax, 1
+    cpuid
+    shr edx, 9
+    and edx, 1
+    mov eax, edx
+    pop rbx
+    ret
+
+read_msr_asm:
+    mov ecx, edi
+    rdmsr
+    shl rdx, 32
+    or rax, rdx
+    ret
+
+write_msr_asm:
+    mov ecx, edi
+    mov rax, rsi
+    mov rdx, rsi
+    shr rdx, 32
+    wrmsr
+    ret
+
+load_dword_asm:
+    mov eax, [rdi]
+    ret
+
+store_dword_asm:
+    mov [rdi], esi
+    ret
+
+outb_asm:
+    mov dx, di
+    mov al, sil
+    out dx, al
+    ret
+
+enable_interrupts:
+    sti
+    ret
+
+disable_interrupts:
+    cli
+    ret
+
+halt_cpu:
+    hlt
+    ret
+
+wait_for_interrupt:
+    sti
+    hlt
+    cli
+    ret
+
+set_lapic_eoi_reg_asm:
+    mov [rel lapic_eoi_reg], rdi
+    ret
+
+read_timer_irq_count_asm:
+    mov rax, [rel timer_irq_count]
+    ret
+
+clear_timer_irq_count_asm:
+    mov qword [rel timer_irq_count], 0
     ret
 
 get_idt_base:
@@ -176,6 +271,10 @@ get_isr14_addr:
     mov rax, isr14
     ret
 
+get_isr32_addr:
+    mov rax, isr32
+    ret
+
 isr0:
     push 0
     push 0
@@ -193,14 +292,25 @@ isr14:
     push 14
     jmp isr_common
 
+isr32:
+    push rax
+    mov rax, [rel lapic_eoi_reg]
+    test rax, rax
+    jz .skip_eoi
+    mov dword [rax], 0
+.skip_eoi:
+    inc qword [rel timer_irq_count]
+    pop rax
+    iretq
+
 isr_common:
     PUSH_REGS
-    sub rsp, 8
-    lea rdi, [rsp + 8]
-    mov rsi, [rsp + 8 + 15 * 8]
-    mov rdx, [rsp + 8 + 16 * 8]
+    sub rsp, 136
+    lea rdi, [rsp + 136]
+    mov rsi, [rsp + 136 + 15 * 8]
+    mov rdx, [rsp + 136 + 16 * 8]
     call isr_dispatch
-    add rsp, 8
+    add rsp, 136
     POP_REGS
     add rsp, 16
     iretq
@@ -247,6 +357,11 @@ idt_table:
     resb 256 * 16
 idtr:
     resb 10
+alignb 8
+lapic_eoi_reg:
+    resq 1
+timer_irq_count:
+    resq 1
 tss64:
     resb 104
 alignb 16

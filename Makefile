@@ -12,18 +12,22 @@ CC = gcc
 OBJCOPY = objcopy
 
 # Directories
-SRC_DIR = src/$(ARCH)
+ARCH_DIR = src/arch/$(ARCH)
+BOOT_DIR = src/boot
+UEFI_SRC_DIR = $(BOOT_DIR)/uefi
+GRUB_SRC_DIR = $(BOOT_DIR)/grub
+KERNEL_DIR = src/kernel
 BUILD_DIR = build
 PROJECT_NAME ?= $(notdir $(CURDIR))
 
 # --- Source Files ---
-BOOT_SRC = $(SRC_DIR)/boot.s
-RUNTIME_SRC = $(SRC_DIR)/runtime.s
-INTERRUPTS_SRC = $(SRC_DIR)/interrupts.s
-KERNEL_SRC = $(SRC_DIR)/kernel.py
-EFI_LOADER_SRC = $(SRC_DIR)/efi_loader.c
-EFI_ENTRY_SRC = $(SRC_DIR)/efi_entry.S
-GRUB_CFG = $(SRC_DIR)/grub.cfg
+BOOT_SRC = $(ARCH_DIR)/boot.s
+RUNTIME_SRC = $(ARCH_DIR)/runtime.s
+INTERRUPTS_SRC = $(ARCH_DIR)/interrupts.s
+KERNEL_SRC = $(KERNEL_DIR)/kernel.py
+EFI_LOADER_SRC = $(UEFI_SRC_DIR)/efi_loader.c
+EFI_ENTRY_SRC = $(UEFI_SRC_DIR)/efi_entry.S
+GRUB_CFG = $(GRUB_SRC_DIR)/grub.cfg
 
 BOOT_NAME = $(notdir $(basename $(BOOT_SRC)))
 RUNTIME_NAME = $(notdir $(basename $(RUNTIME_SRC)))
@@ -52,9 +56,10 @@ KERNEL_IMAGE = $(notdir $(KERNEL_ELF))
 # --- Compiler and Linker Flags ---
 ASFLAGS = -f elf64
 LDFLAGS = -m elf_x86_64 --gc-sections
-LDSCRIPT = $(SRC_DIR)/linker.ld
+LDSCRIPT = $(ARCH_DIR)/linker.ld
 EFI_CFLAGS = -ffreestanding -fshort-wchar -mno-red-zone -maccumulate-outgoing-args -mno-sse -mno-sse2 -mgeneral-regs-only -fcf-protection=none -fno-stack-protector -fno-asynchronous-unwind-tables -fno-unwind-tables -fno-ident -fno-pic -fno-pie -fno-builtin -Wall -Wextra -Wno-unused-parameter
 EFI_LDFLAGS = -mi386pep --subsystem 10 --entry efi_entry --image-base 0x10000000
+LLCFLAGS = -filetype=obj -relocation-model=pic -mcpu=x86-64 -mattr=-bmi,-bmi2,-tbm,-adx
 
 .PHONY: all clean run run-grub debug debug-grub
 
@@ -83,7 +88,7 @@ $(ISO_IMAGE): $(ISO_KERNEL) $(ISO_GRUB_DIR)/grub.cfg
 	grub-mkrescue -o $@ $(ISO_DIR)
 
 $(KERNEL_OBJ): $(KERNEL_LL)
-	$(LLC) -filetype=obj -relocation-model=pic -o $@ $<
+	$(LLC) $(LLCFLAGS) -o $@ $<
 
 $(EFI_LOADER_OBJ): $(EFI_LOADER_SRC)
 	@mkdir -p $(BUILD_DIR)
