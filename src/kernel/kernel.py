@@ -3,15 +3,18 @@ from khal import get_idt_base
 from khal import get_idtr_base
 from khal import halt_cpu
 from khal import serial_init
-from khal import serial_write_hex
-from khal import serial_write_u64
 from kapic import arm_timer_masked
 from kapic import dump_local_apic_summary
 from kapic import dump_timer_summary
 from kapic import init_local_apic
 from kapic import probe_timer_progress
+from kapic import probe_timer_interrupts
 from kboot import dump_boot_info
-from kconsole import serial_write
+from kconsole import console_write
+from kconsole import console_write_hex
+from kconsole import console_write_u64
+from kconsole import init_console
+from kconsole import print_msg
 from kexceptions import handle_exception
 from kexceptions import run_exception_test
 from kidt import init_idt
@@ -32,20 +35,22 @@ def isr_dispatch(frame: int, vector: int, error_code: int):
 def kernel_main(boot_info_ptr: int):
     exception_test = 0
     lapic_timer_count = 10000000
+    lapic_irq_count = 1000000
     serial_init()
+    init_console()
     arch_init()
     init_idt()
-    serial_write("Hello from Codon over serial!\n".c_str())
-    serial_write("idt base=".c_str())
-    serial_write_hex(get_idt_base())
-    serial_write(" idtr=".c_str())
-    serial_write_hex(get_idtr_base())
-    serial_write("\n".c_str())
-    serial_write("boot marker: ".c_str())
-    serial_write_hex(0xC0D0)
-    serial_write(" build=".c_str())
-    serial_write_u64(1)
-    serial_write("\n".c_str())
+    console_write("Hello from Codon over serial!\n".c_str())
+    console_write("idt base=".c_str())
+    console_write_hex(get_idt_base())
+    console_write(" idtr=".c_str())
+    console_write_hex(get_idtr_base())
+    console_write("\n".c_str())
+    console_write("boot marker: ".c_str())
+    console_write_hex(0xC0D0)
+    console_write(" build=".c_str())
+    console_write_u64(1)
+    console_write("\n".c_str())
     dump_boot_info(boot_info_ptr)
     pmm_state = init_pmm(boot_info_ptr)
     dump_pmm_summary(pmm_state)
@@ -53,12 +58,14 @@ def kernel_main(boot_info_ptr: int):
     vmm_state = init_vmm(pmm_state, boot_info_ptr)
     dump_vmm_summary(vmm_state)
     vmm_self_test(vmm_state, pmm_state, boot_info_ptr)
+    print_msg("PCO/OS console online".c_str(), 0, 0x0A)
     run_exception_test(exception_test)
     init_local_apic()
     dump_local_apic_summary()
     arm_timer_masked(lapic_timer_count)
     dump_timer_summary()
     probe_timer_progress()
+    probe_timer_interrupts(lapic_irq_count, 3)
 
     while True:
         halt_cpu()

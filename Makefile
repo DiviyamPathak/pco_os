@@ -25,6 +25,7 @@ BOOT_SRC = $(ARCH_DIR)/boot.s
 RUNTIME_SRC = $(ARCH_DIR)/runtime.s
 INTERRUPTS_SRC = $(ARCH_DIR)/interrupts.s
 KERNEL_SRC = $(KERNEL_DIR)/kernel.py
+KERNEL_PY_SRCS = $(wildcard $(KERNEL_DIR)/*.py)
 EFI_LOADER_SRC = $(UEFI_SRC_DIR)/efi_loader.c
 EFI_ENTRY_SRC = $(UEFI_SRC_DIR)/efi_entry.S
 GRUB_CFG = $(GRUB_SRC_DIR)/grub.cfg
@@ -110,9 +111,9 @@ $(UEFI_DISK): $(EFI_APP) $(KERNEL_ELF)
 	mcopy -i $@ $(EFI_APP) ::/EFI/BOOT/BOOTX64.EFI
 	mcopy -i $@ $(KERNEL_ELF) ::/KERNEL.ELF
 
-$(KERNEL_LL): $(KERNEL_SRC)
+$(KERNEL_LL): $(KERNEL_PY_SRCS)
 	@mkdir -p $(BUILD_DIR)
-	$(CODON) build --llvm -o $@ $<
+	$(CODON) build --llvm -o $@ $(KERNEL_SRC)
 
 $(BOOT_OBJ): $(BOOT_SRC)
 	@mkdir -p $(BUILD_DIR)

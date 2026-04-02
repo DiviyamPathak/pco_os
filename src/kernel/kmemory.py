@@ -1,48 +1,54 @@
-from khal import frame_qword
 from khal import load_cr3
 from khal import read_cr3
-from khal import serial_write_hex
-from khal import serial_write_u64
-from khal import store_qword
 from kboot import boot_info_qword
-from kconsole import serial_write
-from kconsole import serial_write_label_hex
-from kconsole import serial_write_label_u64
-from kconsole import serial_write_line
+from kconsole import console_write
+from kconsole import console_write_label_hex
+from kconsole import console_write_label_u64
+from kconsole import console_write_line
+from kconsole import console_write_u64
+from kconsole import console_write_hex
 from ksupport import align_down
 from ksupport import align_up
 from ksupport import alloc_bytes
+from ksupport import load_qword_region
 from ksupport import panic
+from ksupport import store_qword_region
 
 
 def pmm_state_qword(state_ptr: int, slot: int):
-    return frame_qword(state_ptr, slot)
+    return load_qword_region(state_ptr, 7, slot)
 
 
 def set_pmm_state_qword(state_ptr: int, slot: int, value: int):
-    store_qword(state_ptr, slot, value)
+    store_qword_region(state_ptr, 7, slot, value)
+
+
+def pmm_region_entry_ptr(region_table_ptr: int, index: int):
+    if index < 0 or index >= 64:
+        panic("pmm region index out of range".c_str())
+    return region_table_ptr + index * 16
 
 
 def pmm_region_start(region_table_ptr: int, index: int):
-    return frame_qword(region_table_ptr + index * 16, 0)
+    return load_qword_region(pmm_region_entry_ptr(region_table_ptr, index), 2, 0)
 
 
 def pmm_region_end(region_table_ptr: int, index: int):
-    return frame_qword(region_table_ptr + index * 16, 1)
+    return load_qword_region(pmm_region_entry_ptr(region_table_ptr, index), 2, 1)
 
 
 def set_pmm_region(region_table_ptr: int, index: int, start: int, end: int):
-    entry_ptr = region_table_ptr + index * 16
-    store_qword(entry_ptr, 0, start)
-    store_qword(entry_ptr, 1, end)
+    entry_ptr = pmm_region_entry_ptr(region_table_ptr, index)
+    store_qword_region(entry_ptr, 2, 0, start)
+    store_qword_region(entry_ptr, 2, 1, end)
 
 
 def pmm_stack_push(stack_ptr: int, index: int, value: int):
-    store_qword(stack_ptr, index, value)
+    store_qword_region(stack_ptr, 2048, index, value)
 
 
 def pmm_stack_pop(stack_ptr: int, index: int):
-    return frame_qword(stack_ptr, index)
+    return load_qword_region(stack_ptr, 2048, index)
 
 
 def pmm_add_region(state_ptr: int, start: int, end: int):
@@ -87,9 +93,9 @@ def init_pmm(boot_info_ptr: int):
     entry_index = 0
     while entry_index < mmap_count:
         entry = mmap_ptr + entry_index * 32
-        base = frame_qword(entry, 0)
-        length = frame_qword(entry, 1)
-        entry_type = frame_qword(entry, 2)
+        base = load_qword_region(entry, 4, 0)
+        length = load_qword_region(entry, 4, 1)
+        entry_type = load_qword_region(entry, 4, 2)
 
         if entry_type == 7 and length != 0:
             start = align_up(base, 4096)
@@ -170,21 +176,21 @@ def pmm_free_page(state_ptr: int, page: int):
 
 
 def dump_pmm_summary(state_ptr: int):
-    serial_write_label_u64("pmm.regions=".c_str(), pmm_state_qword(state_ptr, 1))
-    serial_write_label_u64("pmm.total_pages=".c_str(), pmm_state_qword(state_ptr, 5))
-    serial_write_label_u64("pmm.free_pages=".c_str(), pmm_state_qword(state_ptr, 6))
+    console_write_label_u64("pmm.regions=".c_str(), pmm_state_qword(state_ptr, 1))
+    console_write_label_u64("pmm.total_pages=".c_str(), pmm_state_qword(state_ptr, 5))
+    console_write_label_u64("pmm.free_pages=".c_str(), pmm_state_qword(state_ptr, 6))
 
     region_table_ptr = pmm_state_qword(state_ptr, 0)
     region_count = pmm_state_qword(state_ptr, 1)
     region_index = 0
     while region_index < region_count and region_index < 8:
-        serial_write("pmm.region[".c_str())
-        serial_write_u64(region_index)
-        serial_write("] start=".c_str())
-        serial_write_hex(pmm_region_start(region_table_ptr, region_index))
-        serial_write(" end=".c_str())
-        serial_write_hex(pmm_region_end(region_table_ptr, region_index))
-        serial_write("\n".c_str())
+        console_write("pmm.region[".c_str())
+        console_write_u64(region_index)
+        console_write("] start=".c_str())
+        console_write_hex(pmm_region_start(region_table_ptr, region_index))
+        console_write(" end=".c_str())
+        console_write_hex(pmm_region_end(region_table_ptr, region_index))
+        console_write("\n".c_str())
         region_index += 1
 
 
@@ -203,9 +209,9 @@ def pmm_self_test(state_ptr: int):
     if (page0 & 0xFFF) != 0 or (page1 & 0xFFF) != 0 or (page2 & 0xFFF) != 0:
         panic("pmm returned unaligned page".c_str())
 
-    serial_write_label_hex("pmm.test.page0=".c_str(), page0)
-    serial_write_label_hex("pmm.test.page1=".c_str(), page1)
-    serial_write_label_hex("pmm.test.page2=".c_str(), page2)
+    console_write_label_hex("pmm.test.page0=".c_str(), page0)
+    console_write_label_hex("pmm.test.page1=".c_str(), page1)
+    console_write_label_hex("pmm.test.page2=".c_str(), page2)
 
     pmm_free_page(state_ptr, page2)
     pmm_free_page(state_ptr, page1)
@@ -214,22 +220,30 @@ def pmm_self_test(state_ptr: int):
     if pmm_state_qword(state_ptr, 6) != free_before:
         panic("pmm free count mismatch".c_str())
 
-    serial_write_line("pmm self-test ok".c_str())
+    console_write_line("pmm self-test ok".c_str())
 
 
 def zero_page(page_ptr: int):
     slot = 0
     while slot < 512:
-        store_qword(page_ptr, slot, 0)
+        store_qword_region(page_ptr, 512, slot, 0)
         slot += 1
 
 
 def vmm_state_qword(state_ptr: int, slot: int):
-    return frame_qword(state_ptr, slot)
+    return load_qword_region(state_ptr, 8, slot)
 
 
 def set_vmm_state_qword(state_ptr: int, slot: int, value: int):
-    store_qword(state_ptr, slot, value)
+    store_qword_region(state_ptr, 8, slot, value)
+
+
+def page_table_qword(table_ptr: int, slot: int):
+    return load_qword_region(table_ptr, 512, slot)
+
+
+def set_page_table_qword(table_ptr: int, slot: int, value: int):
+    store_qword_region(table_ptr, 512, slot, value)
 
 
 def vmm_reload_current_cr3():
@@ -264,7 +278,7 @@ def vmm_supports_addr(state_ptr: int, virt: int):
 
 def vmm_p2_ptr(state_ptr: int, virt: int):
     p3_ptr = vmm_p3_ptr(state_ptr)
-    p3_entry = frame_qword(p3_ptr, pdpt_index(virt))
+    p3_entry = page_table_qword(p3_ptr, pdpt_index(virt))
     if (p3_entry & 1) == 0:
         return 0
     return align_down(p3_entry, 4096)
@@ -276,7 +290,7 @@ def vmm_split_large_page(state_ptr: int, pmm_state: int, virt: int):
 
     p2_ptr = vmm_p2_ptr(state_ptr, virt)
     p2_slot = pd_index(virt)
-    p2_entry = frame_qword(p2_ptr, p2_slot)
+    p2_entry = page_table_qword(p2_ptr, p2_slot)
 
     if (p2_entry & 1) == 0:
         panic("vmm missing p2 entry".c_str())
@@ -292,10 +306,10 @@ def vmm_split_large_page(state_ptr: int, pmm_state: int, virt: int):
     phys_base = align_down(p2_entry, 0x200000)
     entry_index = 0
     while entry_index < 512:
-        store_qword(pt_ptr, entry_index, phys_base + (entry_index << 12) | 0x003)
+        set_page_table_qword(pt_ptr, entry_index, phys_base + (entry_index << 12) | 0x003)
         entry_index += 1
 
-    store_qword(p2_ptr, p2_slot, pt_ptr | 0x003)
+    set_page_table_qword(p2_ptr, p2_slot, pt_ptr | 0x003)
     vmm_reload_current_cr3()
     return pt_ptr
 
@@ -308,7 +322,7 @@ def vmm_page_flags(state_ptr: int, virt: int):
     if p2_ptr == 0:
         return 0
 
-    p2_entry = frame_qword(p2_ptr, pd_index(virt))
+    p2_entry = page_table_qword(p2_ptr, pd_index(virt))
     if (p2_entry & 1) == 0:
         return 0
 
@@ -316,7 +330,7 @@ def vmm_page_flags(state_ptr: int, virt: int):
         return p2_entry & 0xFFF
 
     pt_ptr = align_down(p2_entry, 4096)
-    pte = frame_qword(pt_ptr, pt_index(virt))
+    pte = page_table_qword(pt_ptr, pt_index(virt))
     if (pte & 1) == 0:
         return 0
     return pte & 0xFFF
@@ -330,7 +344,7 @@ def vmm_translate(state_ptr: int, virt: int):
     if p2_ptr == 0:
         return 0
 
-    p2_entry = frame_qword(p2_ptr, pd_index(virt))
+    p2_entry = page_table_qword(p2_ptr, pd_index(virt))
     if (p2_entry & 1) == 0:
         return 0
 
@@ -338,7 +352,7 @@ def vmm_translate(state_ptr: int, virt: int):
         return align_down(p2_entry, 0x200000) + (virt & 0x1FFFFF)
 
     pt_ptr = align_down(p2_entry, 4096)
-    pte = frame_qword(pt_ptr, pt_index(virt))
+    pte = page_table_qword(pt_ptr, pt_index(virt))
     if (pte & 1) == 0:
         return 0
 
@@ -351,10 +365,10 @@ def vmm_map_page(state_ptr: int, pmm_state: int, virt: int, phys: int, flags: in
 
     pt_ptr = vmm_split_large_page(state_ptr, pmm_state, virt)
     slot = pt_index(virt)
-    if frame_qword(pt_ptr, slot) != 0:
+    if page_table_qword(pt_ptr, slot) != 0:
         panic("vmm map over present entry".c_str())
 
-    store_qword(pt_ptr, slot, phys | (flags & 0xFFF) | 0x001)
+    set_page_table_qword(pt_ptr, slot, phys | (flags & 0xFFF) | 0x001)
     vmm_reload_current_cr3()
 
 
@@ -364,10 +378,10 @@ def vmm_unmap_page(state_ptr: int, pmm_state: int, virt: int):
 
     pt_ptr = vmm_split_large_page(state_ptr, pmm_state, virt)
     slot = pt_index(virt)
-    if frame_qword(pt_ptr, slot) == 0:
+    if page_table_qword(pt_ptr, slot) == 0:
         panic("vmm unmap missing entry".c_str())
 
-    store_qword(pt_ptr, slot, 0)
+    set_page_table_qword(pt_ptr, slot, 0)
     vmm_reload_current_cr3()
 
 
@@ -377,12 +391,12 @@ def vmm_protect_page(state_ptr: int, pmm_state: int, virt: int, flags: int):
 
     pt_ptr = vmm_split_large_page(state_ptr, pmm_state, virt)
     slot = pt_index(virt)
-    pte = frame_qword(pt_ptr, slot)
+    pte = page_table_qword(pt_ptr, slot)
     if pte == 0:
         panic("vmm protect missing entry".c_str())
 
     phys = align_down(pte, 4096)
-    store_qword(pt_ptr, slot, phys | (flags & 0xFFF) | 0x001)
+    set_page_table_qword(pt_ptr, slot, phys | (flags & 0xFFF) | 0x001)
     vmm_reload_current_cr3()
 
 
@@ -399,7 +413,7 @@ def init_vmm(pmm_state: int, boot_info_ptr: int):
 
     zero_page(p4)
     zero_page(p3)
-    store_qword(p4, 0, p3 | 0x003)
+    set_page_table_qword(p4, 0, p3 | 0x003)
 
     while table_index < p2_count:
         p2 = pmm_alloc_page(pmm_state)
@@ -409,11 +423,11 @@ def init_vmm(pmm_state: int, boot_info_ptr: int):
             panic("vmm p2 alloc failed".c_str())
 
         zero_page(p2)
-        store_qword(p3, table_index, p2 | 0x003)
+        set_page_table_qword(p3, table_index, p2 | 0x003)
 
         while entry_index < 512:
             phys = ((table_index * 512) + entry_index) << 21
-            store_qword(p2, entry_index, phys | 0x083)
+            set_page_table_qword(p2, entry_index, phys | 0x083)
             entry_index += 1
 
         table_index += 1
@@ -440,13 +454,13 @@ def init_vmm(pmm_state: int, boot_info_ptr: int):
 
 
 def dump_vmm_summary(state_ptr: int):
-    serial_write_label_hex("vmm.old_cr3=".c_str(), vmm_state_qword(state_ptr, 0))
-    serial_write_label_hex("vmm.new_cr3=".c_str(), vmm_state_qword(state_ptr, 1))
-    serial_write_label_hex("vmm.p3=".c_str(), vmm_state_qword(state_ptr, 2))
-    serial_write_label_u64("vmm.p2_tables=".c_str(), vmm_state_qword(state_ptr, 3))
-    serial_write_label_hex("vmm.identity_limit=".c_str(), vmm_state_qword(state_ptr, 4))
-    serial_write_label_hex("vmm.kernel.start=".c_str(), vmm_state_qword(state_ptr, 5))
-    serial_write_label_hex("vmm.kernel.end=".c_str(), vmm_state_qword(state_ptr, 6))
+    console_write_label_hex("vmm.old_cr3=".c_str(), vmm_state_qword(state_ptr, 0))
+    console_write_label_hex("vmm.new_cr3=".c_str(), vmm_state_qword(state_ptr, 1))
+    console_write_label_hex("vmm.p3=".c_str(), vmm_state_qword(state_ptr, 2))
+    console_write_label_u64("vmm.p2_tables=".c_str(), vmm_state_qword(state_ptr, 3))
+    console_write_label_hex("vmm.identity_limit=".c_str(), vmm_state_qword(state_ptr, 4))
+    console_write_label_hex("vmm.kernel.start=".c_str(), vmm_state_qword(state_ptr, 5))
+    console_write_label_hex("vmm.kernel.end=".c_str(), vmm_state_qword(state_ptr, 6))
 
 
 def vmm_self_test(state_ptr: int, pmm_state: int, boot_info_ptr: int):
@@ -468,9 +482,9 @@ def vmm_self_test(state_ptr: int, pmm_state: int, boot_info_ptr: int):
     if scratch_page == 0:
         panic("vmm self-test scratch alloc failed".c_str())
 
-    serial_write_label_hex("vmm.test.virt=".c_str(), test_virt)
-    serial_write_label_hex("vmm.test.original=".c_str(), vmm_translate(state_ptr, test_virt))
-    serial_write_label_hex("vmm.test.scratch=".c_str(), scratch_page)
+    console_write_label_hex("vmm.test.virt=".c_str(), test_virt)
+    console_write_label_hex("vmm.test.original=".c_str(), vmm_translate(state_ptr, test_virt))
+    console_write_label_hex("vmm.test.scratch=".c_str(), scratch_page)
 
     vmm_unmap_page(state_ptr, pmm_state, test_virt)
     if vmm_translate(state_ptr, test_virt) != 0:
@@ -492,4 +506,4 @@ def vmm_self_test(state_ptr: int, pmm_state: int, boot_info_ptr: int):
         panic("vmm identity restore failed".c_str())
 
     pmm_free_page(pmm_state, scratch_page)
-    serial_write_line("vmm self-test ok".c_str())
+    console_write_line("vmm self-test ok".c_str())

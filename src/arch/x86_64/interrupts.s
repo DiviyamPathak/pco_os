@@ -108,6 +108,13 @@ arch_init:
     lea rax, [rel gdt64_runtime_pointer]
     lgdt [rax]
 
+    lea rax, [rel .runtime_cs_loaded]
+    push qword 0x08
+    push rax
+    retfq
+
+.runtime_cs_loaded:
+
     mov ax, 0x10
     mov ds, ax
     mov es, ax
@@ -119,6 +126,8 @@ arch_init:
     mov [rel tss64 + 4], rax
     lea rax, [rel df_ist_top]
     mov [rel tss64 + 36], rax
+    lea rax, [rel irq_ist_top]
+    mov [rel tss64 + 44], rax
     mov word [rel tss64 + 102], 104
 
     mov ax, 0x18
@@ -293,14 +302,14 @@ isr14:
     jmp isr_common
 
 isr32:
-    push rax
+    PUSH_REGS
     mov rax, [rel lapic_eoi_reg]
     test rax, rax
     jz .skip_eoi
     mov dword [rax], 0
 .skip_eoi:
     inc qword [rel timer_irq_count]
-    pop rax
+    POP_REGS
     iretq
 
 isr_common:
@@ -372,5 +381,9 @@ alignb 16
 df_ist_bottom:
     resb 4096
 df_ist_top:
+alignb 16
+irq_ist_bottom:
+    resb 4096
+irq_ist_top:
 
 section .note.GNU-stack noalloc noexec nowrite progbits

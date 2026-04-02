@@ -1,6 +1,4 @@
 from khal import serial_write_byte
-from khal import serial_write_hex
-from khal import serial_write_u64
 
 
 def print_msg(msg: cobj, line: int, color: int):
@@ -12,34 +10,70 @@ def print_msg(msg: cobj, line: int, color: int):
         i += 1
 
 
-def serial_write(msg: cobj):
+def init_console():
+    pass
+
+
+def enable_vga_console():
+    pass
+
+
+def console_put_byte(ch: byte):
+    if ch == byte(10):
+        serial_write_byte(byte(13))
+    serial_write_byte(ch)
+
+
+def console_write(msg: cobj):
     i = 0
     while msg[i] != byte(0):
-        if msg[i] == byte(10):
-            serial_write_byte(byte(13))
-        serial_write_byte(msg[i])
+        console_put_byte(msg[i])
         i += 1
 
 
-def serial_write_line(msg: cobj):
-    serial_write(msg)
-    serial_write("\n".c_str())
+def console_write_line(msg: cobj):
+    console_write(msg)
+    console_write("\n".c_str())
 
 
-def serial_write_label_hex(label: cobj, value: int):
-    serial_write(label)
-    serial_write_hex(value)
-    serial_write("\n".c_str())
+def console_write_u64(value: int):
+    if value < 0:
+        console_put_byte(byte(45))
+        value = -value
+
+    if value >= 10:
+        console_write_u64(value // 10)
+
+    console_put_byte(byte(48 + value % 10))
 
 
-def serial_write_label_u64(label: cobj, value: int):
-    serial_write(label)
-    serial_write_u64(value)
-    serial_write("\n".c_str())
+def console_write_hex(value: int):
+    shift = 60
+    console_put_byte(byte(48))
+    console_put_byte(byte(120))
+    while shift >= 0:
+        nibble = (value >> shift) & 0xF
+        if nibble < 10:
+            console_put_byte(byte(48 + nibble))
+        else:
+            console_put_byte(byte(55 + nibble))
+        shift -= 4
 
 
-def serial_write_register(name: cobj, value: int):
-    serial_write(name)
-    serial_write("=".c_str())
-    serial_write_hex(value)
-    serial_write("\n".c_str())
+def console_write_label_hex(label: cobj, value: int):
+    console_write(label)
+    console_write_hex(value)
+    console_write("\n".c_str())
+
+
+def console_write_label_u64(label: cobj, value: int):
+    console_write(label)
+    console_write_u64(value)
+    console_write("\n".c_str())
+
+
+def console_write_register(name: cobj, value: int):
+    console_write(name)
+    console_write("=".c_str())
+    console_write_hex(value)
+    console_write("\n".c_str())

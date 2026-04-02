@@ -18,7 +18,7 @@ def init_idt():
     set_idt_gate(8, get_isr8_addr(), 1)
     set_idt_gate(13, get_isr13_addr(), 0)
     set_idt_gate(14, get_isr14_addr(), 0)
-    set_idt_gate(32, get_isr32_addr(), 0)
+    set_idt_gate(32, get_isr32_addr(), 2)
 
     set_idtr_asm(256 * 16 - 1, get_idt_base())
     load_idt_local()
