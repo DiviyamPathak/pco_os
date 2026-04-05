@@ -31,6 +31,14 @@ def console_write(msg: cobj):
         i += 1
 
 
+def console_write_ptr(ptr: int):
+    msg = Ptr[byte](ptr)
+    i = 0
+    while msg[i] != byte(0):
+        console_put_byte(msg[i])
+        i += 1
+
+
 def console_write_line(msg: cobj):
     console_write(msg)
     console_write("\n".c_str())

@@ -1,7 +1,6 @@
 from khal import arch_init
 from khal import get_idt_base
 from khal import get_idtr_base
-from khal import halt_cpu
 from khal import serial_init
 from kapic import arm_timer_masked
 from kapic import dump_local_apic_summary
@@ -18,6 +17,13 @@ from kconsole import print_msg
 from kexceptions import handle_exception
 from kexceptions import run_exception_test
 from kidt import init_idt
+from ksched import dump_scheduler_summary
+from ksched import init_scheduler
+from ksched import scheduler_idle_loop
+from ksched import scheduler_self_test
+from ksyscall import syscall_self_test
+from ktime import start_kernel_tick_source
+from ktime import timekeeping_self_test
 from kmemory import dump_pmm_summary
 from kmemory import dump_vmm_summary
 from kmemory import init_pmm
@@ -35,7 +41,7 @@ def isr_dispatch(frame: int, vector: int, error_code: int):
 def kernel_main(boot_info_ptr: int):
     exception_test = 0
     lapic_timer_count = 10000000
-    lapic_irq_count = 1000000
+    lapic_tick_reload = 1000000
     serial_init()
     init_console()
     arch_init()
@@ -65,7 +71,12 @@ def kernel_main(boot_info_ptr: int):
     arm_timer_masked(lapic_timer_count)
     dump_timer_summary()
     probe_timer_progress()
-    probe_timer_interrupts(lapic_irq_count, 3)
-
-    while True:
-        halt_cpu()
+    probe_timer_interrupts(lapic_tick_reload, 3)
+    start_kernel_tick_source(lapic_tick_reload)
+    timekeeping_self_test(5)
+    scheduler_state = init_scheduler()
+    dump_scheduler_summary(scheduler_state)
+    syscall_self_test()
+    dump_scheduler_summary(scheduler_state)
+    scheduler_self_test(scheduler_state, 5)
+    scheduler_idle_loop(scheduler_state)

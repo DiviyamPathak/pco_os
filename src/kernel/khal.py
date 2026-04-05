@@ -2,6 +2,8 @@ from C import serial_init()
 from C import serial_write_byte(byte)
 from C import serial_write_u64(int)
 from C import serial_write_hex(int)
+from C import set_active_scheduler_asm(int)
+from C import get_active_scheduler_asm() -> int
 from C import seq_alloc_atomic(int) -> int
 from C import seq_terminate()
 from C import arch_init()
@@ -78,3 +80,11 @@ def read_timer_irq_count():
 
 def clear_timer_irq_count():
     clear_timer_irq_count_asm()
+
+
+def set_active_scheduler(addr: int):
+    set_active_scheduler_asm(addr)
+
+
+def get_active_scheduler():
+    return get_active_scheduler_asm()

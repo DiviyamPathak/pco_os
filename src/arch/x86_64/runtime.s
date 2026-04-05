@@ -14,6 +14,8 @@ global serial_init
 global serial_write_byte
 global serial_write_u64
 global serial_write_hex
+global set_active_scheduler_asm
+global get_active_scheduler_asm
 
 section .bss
 align 16
@@ -24,6 +26,8 @@ heap_ptr:
     resq 1
 u64_buffer:
     resb 32
+active_scheduler_ptr:
+    resq 1
 
 section .text
 
@@ -195,6 +199,14 @@ serial_write_hex:
     shl r8, 4
     dec rcx
     jnz .hex_loop
+    ret
+
+set_active_scheduler_asm:
+    mov [rel active_scheduler_ptr], rdi
+    ret
+
+get_active_scheduler_asm:
+    mov rax, [rel active_scheduler_ptr]
     ret
 
 section .note.GNU-stack noalloc noexec nowrite progbits
