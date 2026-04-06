@@ -60,7 +60,7 @@ LDFLAGS = -m elf_x86_64 --gc-sections
 LDSCRIPT = $(ARCH_DIR)/linker.ld
 EFI_CFLAGS = -ffreestanding -fshort-wchar -mno-red-zone -maccumulate-outgoing-args -mno-sse -mno-sse2 -mgeneral-regs-only -fcf-protection=none -fno-stack-protector -fno-asynchronous-unwind-tables -fno-unwind-tables -fno-ident -fno-pic -fno-pie -fno-builtin -Wall -Wextra -Wno-unused-parameter
 EFI_LDFLAGS = -mi386pep --subsystem 10 --entry efi_entry --image-base 0x10000000
-LLCFLAGS = -filetype=obj -relocation-model=pic -mcpu=x86-64 -mattr=-bmi,-bmi2,-tbm,-adx
+LLCFLAGS = -filetype=obj -relocation-model=pic -mcpu=x86-64 -mattr=-bmi,-bmi2,-tbm,-adx,-avx,-avx2,-fma,-f16c
 
 .PHONY: all clean run run-grub debug debug-grub
 

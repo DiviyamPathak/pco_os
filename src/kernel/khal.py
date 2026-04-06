@@ -4,6 +4,13 @@ from C import serial_write_u64(int)
 from C import serial_write_hex(int)
 from C import set_active_scheduler_asm(int)
 from C import get_active_scheduler_asm() -> int
+from C import context_switch_asm(int, int)
+from C import restore_task_context_asm(int)
+from C import get_task_trampoline_addr_asm() -> int
+from C import get_user_task_trampoline_addr_asm() -> int
+from C import get_user_demo_entry_addr_asm() -> int
+from C import enter_user_mode_asm(int, int)
+from C import invoke_syscall_asm(int, int, int, int, int, int) -> int
 from C import seq_alloc_atomic(int) -> int
 from C import seq_terminate()
 from C import arch_init()
@@ -28,7 +35,9 @@ from C import clear_timer_irq_count_asm()
 from C import get_idt_base() -> int
 from C import get_idtr_base() -> int
 from C import set_idt_gate_asm(int, int, int)
+from C import set_idt_gate_user_asm(int, int, int)
 from C import set_idtr_asm(int, int)
+from C import set_tss_rsp0_asm(int)
 from C import frame_qword_asm(int, int) -> int
 from C import store_qword_asm(int, int, int)
 from C import get_isr0_addr() -> int
@@ -36,6 +45,7 @@ from C import get_isr8_addr() -> int
 from C import get_isr13_addr() -> int
 from C import get_isr14_addr() -> int
 from C import get_isr32_addr() -> int
+from C import get_isr128_addr() -> int
 from C import trigger_interrupt0()
 from C import trigger_divide_error()
 from C import trigger_general_protection()
@@ -88,3 +98,39 @@ def set_active_scheduler(addr: int):
 
 def get_active_scheduler():
     return get_active_scheduler_asm()
+
+
+def context_switch(old_ctx_ptr: int, new_ctx_ptr: int):
+    context_switch_asm(old_ctx_ptr, new_ctx_ptr)
+
+
+def restore_task_context(ctx_ptr: int):
+    restore_task_context_asm(ctx_ptr)
+
+
+def task_trampoline_addr():
+    return get_task_trampoline_addr_asm()
+
+
+def user_task_trampoline_addr():
+    return get_user_task_trampoline_addr_asm()
+
+
+def user_demo_entry_addr():
+    return get_user_demo_entry_addr_asm()
+
+
+def enter_user_mode(user_rip: int, user_rsp: int):
+    enter_user_mode_asm(user_rip, user_rsp)
+
+
+def invoke_syscall(number: int, a0: int, a1: int, a2: int, a3: int, a4: int):
+    return invoke_syscall_asm(number, a0, a1, a2, a3, a4)
+
+
+def set_idt_gate_user(index: int, handler: int, ist: int):
+    set_idt_gate_user_asm(index, handler, ist)
+
+
+def set_tss_rsp0(addr: int):
+    set_tss_rsp0_asm(addr)

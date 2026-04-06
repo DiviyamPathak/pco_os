@@ -19,9 +19,18 @@ from kexceptions import run_exception_test
 from kidt import init_idt
 from ksched import dump_scheduler_summary
 from ksched import init_scheduler
-from ksched import scheduler_idle_loop
+from ksched import scheduler_enter_first_task
 from ksched import scheduler_self_test
+from ksyscall import sys_clock_ticks
+from ksyscall import sys_exit
+from ksyscall import sys_getpid
+from ksyscall import sys_spawn_user_demo
+from ksyscall import sys_waitpid
+from ksyscall import sys_write
+from ksyscall import sys_write_u64
+from ksyscall import sys_yield
 from ksyscall import syscall_self_test
+from ktime import wait_for_tick_edge
 from ktime import start_kernel_tick_source
 from ktime import timekeeping_self_test
 from kmemory import dump_pmm_summary
@@ -35,6 +44,92 @@ from kmemory import vmm_self_test
 @export
 def isr_dispatch(frame: int, vector: int, error_code: int):
     handle_exception(frame, vector, error_code)
+
+
+def idle_task_main():
+    while True:
+        wait_for_tick_edge()
+        sys_yield()
+
+
+def worker_task_one():
+    sys_write("task1 start pid=".c_str())
+    sys_write_u64(sys_getpid())
+    sys_write("\n".c_str())
+
+    child_pid = sys_spawn_user_demo()
+    sys_write("task1 spawned pid=".c_str())
+    sys_write_u64(child_pid)
+    sys_write("\n".c_str())
+
+    status = sys_waitpid(child_pid)
+    sys_write("task1 waitpid=".c_str())
+    sys_write_u64(child_pid)
+    sys_write(" status=".c_str())
+    sys_write_u64(status)
+    sys_write(" ticks=".c_str())
+    sys_write_u64(sys_clock_ticks())
+    sys_write("\n".c_str())
+
+    next_report = sys_clock_ticks() + 100
+    while True:
+        sys_yield()
+        now = sys_clock_ticks()
+        if now >= next_report:
+            sys_write("task1 heartbeat ticks=".c_str())
+            sys_write_u64(now)
+            sys_write("\n".c_str())
+            next_report = now + 100
+
+
+def worker_task_two():
+    sys_write("task2 start pid=".c_str())
+    sys_write_u64(sys_getpid())
+    sys_write("\n".c_str())
+
+    turn = 0
+    while turn < 3:
+        sys_write("task2 turn=".c_str())
+        sys_write_u64(turn)
+        sys_write(" ticks=".c_str())
+        sys_write_u64(sys_clock_ticks())
+        sys_write("\n".c_str())
+        turn += 1
+        sys_yield()
+
+    sys_write("task2 exit=42\n".c_str())
+    sys_exit(42)
+
+
+@export
+def task_bootstrap(task_id: int):
+    if task_id == 0:
+        idle_task_main()
+        return
+    if task_id == 1:
+        worker_task_one()
+        return
+    if task_id == 2:
+        worker_task_two()
+        return
+
+    console_write("unknown task id=".c_str())
+    console_write_u64(task_id)
+    console_write("\n".c_str())
+    halt_forever()
+
+
+@export
+def task_returned(code: int):
+    console_write("task returned code=".c_str())
+    console_write_u64(code)
+    console_write("\n".c_str())
+    halt_forever()
+
+
+def halt_forever():
+    while True:
+        wait_for_tick_edge()
 
 
 @export
@@ -74,9 +169,9 @@ def kernel_main(boot_info_ptr: int):
     probe_timer_interrupts(lapic_tick_reload, 3)
     start_kernel_tick_source(lapic_tick_reload)
     timekeeping_self_test(5)
-    scheduler_state = init_scheduler()
+    scheduler_state = init_scheduler(pmm_state, vmm_state)
     dump_scheduler_summary(scheduler_state)
     syscall_self_test()
     dump_scheduler_summary(scheduler_state)
     scheduler_self_test(scheduler_state, 5)
-    scheduler_idle_loop(scheduler_state)
+    scheduler_enter_first_task(scheduler_state)

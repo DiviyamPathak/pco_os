@@ -230,6 +230,13 @@ def zero_page(page_ptr: int):
         slot += 1
 
 
+def copy_page(src_ptr: int, dst_ptr: int):
+    slot = 0
+    while slot < 512:
+        store_qword_region(dst_ptr, 512, slot, load_qword_region(src_ptr, 512, slot))
+        slot += 1
+
+
 def vmm_state_qword(state_ptr: int, slot: int):
     return load_qword_region(state_ptr, 8, slot)
 
@@ -270,14 +277,71 @@ def vmm_p3_ptr(state_ptr: int):
     return vmm_state_qword(state_ptr, 2)
 
 
+def vmm_root_p3_ptr(root_p4: int):
+    p4_entry = page_table_qword(root_p4, 0)
+    if (p4_entry & 1) == 0:
+        panic("vmm root missing p3".c_str())
+    return align_down(p4_entry, 4096)
+
+
+def copy_page_table(src_ptr: int, dst_ptr: int):
+    slot = 0
+    while slot < 512:
+        set_page_table_qword(dst_ptr, slot, page_table_qword(src_ptr, slot))
+        slot += 1
+
+
+def vmm_clone_kernel_address_space(state_ptr: int, pmm_state: int):
+    src_p4 = vmm_state_qword(state_ptr, 1)
+    src_p3 = vmm_state_qword(state_ptr, 2)
+    p2_count = vmm_state_qword(state_ptr, 3)
+    dst_p4 = pmm_alloc_page(pmm_state)
+    dst_p3 = pmm_alloc_page(pmm_state)
+
+    if dst_p4 == 0 or dst_p3 == 0:
+        panic("vmm clone alloc failed".c_str())
+
+    zero_page(dst_p4)
+    zero_page(dst_p3)
+    set_page_table_qword(dst_p4, 0, dst_p3 | 0x003)
+
+    table_index = 0
+    while table_index < p2_count:
+        src_p2 = align_down(page_table_qword(src_p3, table_index), 4096)
+        dst_p2 = pmm_alloc_page(pmm_state)
+        if dst_p2 == 0:
+            panic("vmm clone p2 alloc failed".c_str())
+        copy_page_table(src_p2, dst_p2)
+        set_page_table_qword(dst_p3, table_index, dst_p2 | 0x003)
+        table_index += 1
+
+    if read_cr3() == src_p4:
+        load_cr3(src_p4)
+    return dst_p4
+
+
 def vmm_supports_addr(state_ptr: int, virt: int):
     if pml4_index(virt) != 0:
         return False
     return virt < vmm_state_qword(state_ptr, 4)
 
 
+def vmm_root_supports_addr(limit: int, virt: int):
+    if pml4_index(virt) != 0:
+        return False
+    return virt < limit
+
+
 def vmm_p2_ptr(state_ptr: int, virt: int):
     p3_ptr = vmm_p3_ptr(state_ptr)
+    p3_entry = page_table_qword(p3_ptr, pdpt_index(virt))
+    if (p3_entry & 1) == 0:
+        return 0
+    return align_down(p3_entry, 4096)
+
+
+def vmm_root_p2_ptr(root_p4: int, virt: int):
+    p3_ptr = vmm_root_p3_ptr(root_p4)
     p3_entry = page_table_qword(p3_ptr, pdpt_index(virt))
     if (p3_entry & 1) == 0:
         return 0
@@ -311,6 +375,37 @@ def vmm_split_large_page(state_ptr: int, pmm_state: int, virt: int):
 
     set_page_table_qword(p2_ptr, p2_slot, pt_ptr | 0x003)
     vmm_reload_current_cr3()
+    return pt_ptr
+
+
+def vmm_root_split_large_page(root_p4: int, limit: int, pmm_state: int, virt: int):
+    if not vmm_root_supports_addr(limit, virt):
+        panic("vmm root address outside bootstrap range".c_str())
+
+    p2_ptr = vmm_root_p2_ptr(root_p4, virt)
+    p2_slot = pd_index(virt)
+    p2_entry = page_table_qword(p2_ptr, p2_slot)
+
+    if (p2_entry & 1) == 0:
+        panic("vmm root missing p2 entry".c_str())
+
+    if (p2_entry & 0x80) == 0:
+        return align_down(p2_entry, 4096)
+
+    pt_ptr = pmm_alloc_page(pmm_state)
+    if pt_ptr == 0:
+        panic("vmm root split alloc failed".c_str())
+
+    zero_page(pt_ptr)
+    phys_base = align_down(p2_entry, 0x200000)
+    entry_index = 0
+    while entry_index < 512:
+        set_page_table_qword(pt_ptr, entry_index, phys_base + (entry_index << 12) | 0x003)
+        entry_index += 1
+
+    set_page_table_qword(p2_ptr, p2_slot, pt_ptr | 0x003)
+    if read_cr3() == root_p4:
+        load_cr3(root_p4)
     return pt_ptr
 
 
@@ -359,6 +454,29 @@ def vmm_translate(state_ptr: int, virt: int):
     return align_down(pte, 4096) + (virt & 0xFFF)
 
 
+def vmm_translate_root(state_ptr: int, root_p4: int, virt: int):
+    if not vmm_root_supports_addr(vmm_state_qword(state_ptr, 4), virt):
+        return 0
+
+    p2_ptr = vmm_root_p2_ptr(root_p4, virt)
+    if p2_ptr == 0:
+        return 0
+
+    p2_entry = page_table_qword(p2_ptr, pd_index(virt))
+    if (p2_entry & 1) == 0:
+        return 0
+
+    if (p2_entry & 0x80) != 0:
+        return align_down(p2_entry, 0x200000) + (virt & 0x1FFFFF)
+
+    pt_ptr = align_down(p2_entry, 4096)
+    pte = page_table_qword(pt_ptr, pt_index(virt))
+    if (pte & 1) == 0:
+        return 0
+
+    return align_down(pte, 4096) + (virt & 0xFFF)
+
+
 def vmm_map_page(state_ptr: int, pmm_state: int, virt: int, phys: int, flags: int):
     if (virt & 0xFFF) != 0 or (phys & 0xFFF) != 0:
         panic("vmm map requires 4k alignment".c_str())
@@ -370,6 +488,44 @@ def vmm_map_page(state_ptr: int, pmm_state: int, virt: int, phys: int, flags: in
 
     set_page_table_qword(pt_ptr, slot, phys | (flags & 0xFFF) | 0x001)
     vmm_reload_current_cr3()
+
+
+def vmm_map_page_root(state_ptr: int, root_p4: int, pmm_state: int, virt: int, phys: int, flags: int):
+    if (virt & 0xFFF) != 0 or (phys & 0xFFF) != 0:
+        panic("vmm root map requires 4k alignment".c_str())
+
+    pt_ptr = vmm_root_split_large_page(root_p4, vmm_state_qword(state_ptr, 4), pmm_state, virt)
+    if (flags & 0x004) != 0:
+        p3_ptr = vmm_root_p3_ptr(root_p4)
+        pdpt_slot = pdpt_index(virt)
+        p2_ptr = vmm_root_p2_ptr(root_p4, virt)
+        p2_slot = pd_index(virt)
+
+        set_page_table_qword(root_p4, 0, page_table_qword(root_p4, 0) | 0x004)
+        set_page_table_qword(p3_ptr, pdpt_slot, page_table_qword(p3_ptr, pdpt_slot) | 0x004)
+        set_page_table_qword(p2_ptr, p2_slot, page_table_qword(p2_ptr, p2_slot) | 0x004)
+
+    slot = pt_index(virt)
+    if page_table_qword(pt_ptr, slot) != 0:
+        panic("vmm root map over present entry".c_str())
+
+    set_page_table_qword(pt_ptr, slot, phys | (flags & 0xFFF) | 0x001)
+    if read_cr3() == root_p4:
+        load_cr3(root_p4)
+
+
+def vmm_unmap_page_root(state_ptr: int, root_p4: int, pmm_state: int, virt: int):
+    if (virt & 0xFFF) != 0:
+        panic("vmm root unmap requires 4k alignment".c_str())
+
+    pt_ptr = vmm_root_split_large_page(root_p4, vmm_state_qword(state_ptr, 4), pmm_state, virt)
+    slot = pt_index(virt)
+    if page_table_qword(pt_ptr, slot) == 0:
+        panic("vmm root unmap missing entry".c_str())
+
+    set_page_table_qword(pt_ptr, slot, 0)
+    if read_cr3() == root_p4:
+        load_cr3(root_p4)
 
 
 def vmm_unmap_page(state_ptr: int, pmm_state: int, virt: int):

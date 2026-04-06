@@ -24,7 +24,9 @@ global clear_timer_irq_count_asm
 global get_idt_base
 global get_idtr_base
 global set_idt_gate_asm
+global set_idt_gate_user_asm
 global set_idtr_asm
+global set_tss_rsp0_asm
 global frame_qword_asm
 global store_qword_asm
 global get_isr0_addr
@@ -32,17 +34,20 @@ global get_isr8_addr
 global get_isr13_addr
 global get_isr14_addr
 global get_isr32_addr
+global get_isr128_addr
 global isr0
 global isr8
 global isr13
 global isr14
 global isr32
+global isr128
 global trigger_interrupt0
 global trigger_divide_error
 global trigger_general_protection
 global trigger_page_fault
 
 extern isr_dispatch
+extern syscall_entry
 
 %macro PUSH_REGS 0
     push r15
@@ -130,7 +135,7 @@ arch_init:
     mov [rel tss64 + 44], rax
     mov word [rel tss64 + 102], 104
 
-    mov ax, 0x18
+    mov ax, 0x28
     ltr ax
     ret
 
@@ -250,10 +255,31 @@ set_idt_gate_asm:
     mov dword [rax + 12], 0
     ret
 
+set_idt_gate_user_asm:
+    lea rax, [rel idt_table]
+    mov rcx, rdi
+    shl rcx, 4
+    add rax, rcx
+
+    mov word [rax], si
+    mov word [rax + 2], 0x08
+    mov byte [rax + 4], dl
+    mov byte [rax + 5], 0xEE
+    shr rsi, 16
+    mov word [rax + 6], si
+    shr rsi, 16
+    mov dword [rax + 8], esi
+    mov dword [rax + 12], 0
+    ret
+
 set_idtr_asm:
     lea rax, [rel idtr]
     mov word [rax], di
     mov qword [rax + 2], rsi
+    ret
+
+set_tss_rsp0_asm:
+    mov [rel tss64 + 4], rdi
     ret
 
 frame_qword_asm:
@@ -284,6 +310,10 @@ get_isr32_addr:
     mov rax, isr32
     ret
 
+get_isr128_addr:
+    mov rax, isr128
+    ret
+
 isr0:
     push 0
     push 0
@@ -309,6 +339,19 @@ isr32:
     mov dword [rax], 0
 .skip_eoi:
     inc qword [rel timer_irq_count]
+    POP_REGS
+    iretq
+
+isr128:
+    PUSH_REGS
+    mov rdi, [rsp + 0]
+    mov rsi, [rsp + 40]
+    mov rdx, [rsp + 32]
+    mov rcx, [rsp + 24]
+    mov r8, [rsp + 72]
+    mov r9, [rsp + 56]
+    call syscall_entry
+    mov [rsp + 0], rax
     POP_REGS
     iretq
 
@@ -352,6 +395,10 @@ gdt64_runtime:
     dq (1<<43) | (1<<44) | (1<<47) | (1<<53)
 .data: equ $ - gdt64_runtime
     dq (1<<41) | (1<<44) | (1<<47)
+.user_code: equ $ - gdt64_runtime
+    dq (1<<43) | (1<<44) | (1<<47) | (1<<53) | (3<<45)
+.user_data: equ $ - gdt64_runtime
+    dq (1<<41) | (1<<44) | (1<<47) | (3<<45)
 .tss: equ $ - gdt64_runtime
 gdt64_tss_desc:
     dq 0
