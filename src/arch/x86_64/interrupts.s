@@ -13,6 +13,8 @@ global read_msr_asm
 global write_msr_asm
 global load_dword_asm
 global store_dword_asm
+global load_byte_asm
+global store_byte_asm
 global outb_asm
 global enable_interrupts
 global disable_interrupts
@@ -192,6 +194,14 @@ load_dword_asm:
 
 store_dword_asm:
     mov [rdi], esi
+    ret
+
+load_byte_asm:
+    movzx eax, byte [rdi]
+    ret
+
+store_byte_asm:
+    mov [rdi], sil
     ret
 
 outb_asm:

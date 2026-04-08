@@ -39,6 +39,10 @@ from kmemory import init_pmm
 from kmemory import init_vmm
 from kmemory import pmm_self_test
 from kmemory import vmm_self_test
+from ksupport import panic
+from kvfs import dump_vfs_summary
+from kvfs import init_vfs
+from kvfs import vfs_self_test
 
 
 @export
@@ -53,18 +57,38 @@ def idle_task_main():
 
 
 def worker_task_one():
+    first_child = 0
+    second_child = 0
+
     sys_write("task1 start pid=".c_str())
     sys_write_u64(sys_getpid())
     sys_write("\n".c_str())
 
-    child_pid = sys_spawn_user_demo()
+    first_child = sys_spawn_user_demo()
     sys_write("task1 spawned pid=".c_str())
-    sys_write_u64(child_pid)
+    sys_write_u64(first_child)
     sys_write("\n".c_str())
 
-    status = sys_waitpid(child_pid)
+    status = sys_waitpid(first_child)
     sys_write("task1 waitpid=".c_str())
-    sys_write_u64(child_pid)
+    sys_write_u64(first_child)
+    sys_write(" status=".c_str())
+    sys_write_u64(status)
+    sys_write(" ticks=".c_str())
+    sys_write_u64(sys_clock_ticks())
+    sys_write("\n".c_str())
+
+    second_child = sys_spawn_user_demo()
+    sys_write("task1 respawned pid=".c_str())
+    sys_write_u64(second_child)
+    sys_write("\n".c_str())
+
+    if second_child != first_child:
+        panic("scheduler slot reuse failed".c_str())
+
+    status = sys_waitpid(second_child)
+    sys_write("task1 second waitpid=".c_str())
+    sys_write_u64(second_child)
     sys_write(" status=".c_str())
     sys_write_u64(status)
     sys_write(" ticks=".c_str())
@@ -153,6 +177,9 @@ def kernel_main(boot_info_ptr: int):
     console_write_u64(1)
     console_write("\n".c_str())
     dump_boot_info(boot_info_ptr)
+    vfs_state = init_vfs(boot_info_ptr)
+    dump_vfs_summary(vfs_state)
+    vfs_self_test(vfs_state)
     pmm_state = init_pmm(boot_info_ptr)
     dump_pmm_summary(pmm_state)
     pmm_self_test(pmm_state)
@@ -169,7 +196,7 @@ def kernel_main(boot_info_ptr: int):
     probe_timer_interrupts(lapic_tick_reload, 3)
     start_kernel_tick_source(lapic_tick_reload)
     timekeeping_self_test(5)
-    scheduler_state = init_scheduler(pmm_state, vmm_state)
+    scheduler_state = init_scheduler(pmm_state, vmm_state, vfs_state)
     dump_scheduler_summary(scheduler_state)
     syscall_self_test()
     dump_scheduler_summary(scheduler_state)

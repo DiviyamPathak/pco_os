@@ -28,7 +28,7 @@ stack_bottom:
 stack_top:
 alignb 16
 boot_info:
-    resq 21
+    resq 23
 
 section .rodata
 gdt64:
@@ -136,6 +136,8 @@ long_mode_start:
     mov [boot_info + 19 * 8], rax
     mov eax, [multiboot_magic]
     mov [boot_info + 20 * 8], rax
+    mov qword [boot_info + 21 * 8], 0
+    mov qword [boot_info + 22 * 8], 0
 
     lea rdi, [rel boot_info]
     call kernel_entry64

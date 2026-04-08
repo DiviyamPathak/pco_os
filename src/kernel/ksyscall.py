@@ -1,21 +1,26 @@
 from khal import get_active_scheduler
 from khal import invoke_syscall
-from kconsole import console_put_byte
 from kconsole import console_write
 from kconsole import console_write_label_u64
 from kconsole import console_write_line
-from kconsole import console_write_ptr
 from kconsole import console_write_u64
 from ksched import scheduler_create_user_task
 from ksched import scheduler_current_task
 from ksched import scheduler_exit_current_task
 from ksched import scheduler_runnable_count
+from ksched import scheduler_set_task_fd_object
+from ksched import scheduler_task_fd_object
 from ksched import scheduler_task_mode
 from ksched import scheduler_task_user_base
 from ksched import scheduler_task_user_limit
+from ksched import scheduler_vfs_state
 from ksched import scheduler_waitpid
 from ksched import scheduler_yield_current_task
 from ksched import task_mode_user
+from kvfs import vfs_close_descriptor
+from kvfs import vfs_open_path
+from kvfs import vfs_read_descriptor
+from kvfs import vfs_write_descriptor
 from ksupport import panic
 from ktime import current_kernel_ticks
 
@@ -48,6 +53,18 @@ def syscall_spawn_user_demo_number():
     return 7
 
 
+def syscall_close_number():
+    return 8
+
+
+def syscall_open_number():
+    return 9
+
+
+def syscall_read_number():
+    return 10
+
+
 def active_scheduler_state():
     state_ptr = get_active_scheduler()
     if state_ptr == 0:
@@ -55,25 +72,96 @@ def active_scheduler_state():
     return state_ptr
 
 
-def syscall_write_user_ptr(state_ptr: int, task_id: int, ptr: int):
+def syscall_validate_user_buffer(state_ptr: int, task_id: int, ptr: int, length: int):
     base = scheduler_task_user_base(state_ptr, task_id)
     limit = scheduler_task_user_limit(state_ptr, task_id)
     if base == 0 or limit <= base:
-        return -1
-    if ptr < base or ptr >= limit:
-        return -1
+        return False
+    if length < 0:
+        return False
+    if ptr == 0 and length != 0:
+        return False
+    if ptr < base:
+        return False
+    if ptr + length < ptr or ptr + length > limit:
+        return False
+    return True
 
-    msg = Ptr[byte](ptr)
-    length = 0
-    current = ptr
-    while current < limit:
-        ch = msg[length]
-        if ch == byte(0):
-            return length
-        console_put_byte(ch)
-        length += 1
-        current += 1
+
+def syscall_write_user_buffer(state_ptr: int, task_id: int, fd: int, ptr: int, length: int):
+    if not syscall_validate_user_buffer(state_ptr, task_id, ptr, length):
+        return -1
+    return vfs_write_descriptor(scheduler_vfs_state(state_ptr), scheduler_task_fd_object(state_ptr, task_id, fd), ptr, length)
+
+
+def syscall_write_kernel_buffer(state_ptr: int, task_id: int, fd: int, ptr: int, length: int):
+    if length < 0:
+        return -1
+    if ptr == 0 and length != 0:
+        return -1
+    return vfs_write_descriptor(scheduler_vfs_state(state_ptr), scheduler_task_fd_object(state_ptr, task_id, fd), ptr, length)
+
+
+def syscall_alloc_task_fd(state_ptr: int, task_id: int, desc_id: int):
+    fd = 3
+    while fd >= 0:
+        if scheduler_task_fd_object(state_ptr, task_id, fd) == 0:
+            scheduler_set_task_fd_object(state_ptr, task_id, fd, desc_id)
+            return fd
+        fd -= 1
     return -1
+
+
+def syscall_read_user_buffer(state_ptr: int, task_id: int, fd: int, ptr: int, length: int):
+    if not syscall_validate_user_buffer(state_ptr, task_id, ptr, length):
+        return -1
+    return vfs_read_descriptor(scheduler_vfs_state(state_ptr), scheduler_task_fd_object(state_ptr, task_id, fd), ptr, length)
+
+
+def syscall_read_kernel_buffer(state_ptr: int, task_id: int, fd: int, ptr: int, length: int):
+    if length < 0:
+        return -1
+    if ptr == 0 and length != 0:
+        return -1
+    return vfs_read_descriptor(scheduler_vfs_state(state_ptr), scheduler_task_fd_object(state_ptr, task_id, fd), ptr, length)
+
+
+def syscall_open_user_path(state_ptr: int, task_id: int, path_ptr: int, path_len: int, flags: int):
+    desc_id = 0
+    if not syscall_validate_user_buffer(state_ptr, task_id, path_ptr, path_len):
+        return -1
+    desc_id = vfs_open_path(scheduler_vfs_state(state_ptr), path_ptr, path_len, flags)
+    if desc_id == 0:
+        return -1
+    fd = syscall_alloc_task_fd(state_ptr, task_id, desc_id)
+    if fd < 0:
+        vfs_close_descriptor(scheduler_vfs_state(state_ptr), desc_id)
+        return -1
+    return fd
+
+
+def syscall_open_kernel_path(state_ptr: int, task_id: int, path_ptr: int, path_len: int, flags: int):
+    desc_id = 0
+    if path_ptr == 0 or path_len <= 0:
+        return -1
+    desc_id = vfs_open_path(scheduler_vfs_state(state_ptr), path_ptr, path_len, flags)
+    if desc_id == 0:
+        return -1
+    fd = syscall_alloc_task_fd(state_ptr, task_id, desc_id)
+    if fd < 0:
+        vfs_close_descriptor(scheduler_vfs_state(state_ptr), desc_id)
+        return -1
+    return fd
+
+
+def syscall_close_fd(state_ptr: int, task_id: int, fd: int):
+    desc_id = scheduler_task_fd_object(state_ptr, task_id, fd)
+    if desc_id == 0:
+        return -1
+    if vfs_close_descriptor(scheduler_vfs_state(state_ptr), desc_id) != 0:
+        return -1
+    scheduler_set_task_fd_object(state_ptr, task_id, fd, 0)
+    return 0
 
 
 def syscall_dispatch(number: int, a0: int, a1: int, a2: int, a3: int, a4: int, a5: int):
@@ -82,9 +170,18 @@ def syscall_dispatch(number: int, a0: int, a1: int, a2: int, a3: int, a4: int, a
 
     if number == syscall_write_number():
         if scheduler_task_mode(state_ptr, current_task) == task_mode_user():
-            return syscall_write_user_ptr(state_ptr, current_task, a0)
-        console_write_ptr(a0)
-        return 0
+            return syscall_write_user_buffer(state_ptr, current_task, a0, a1, a2)
+        return syscall_write_kernel_buffer(state_ptr, current_task, a0, a1, a2)
+
+    if number == syscall_open_number():
+        if scheduler_task_mode(state_ptr, current_task) == task_mode_user():
+            return syscall_open_user_path(state_ptr, current_task, a0, a1, a2)
+        return syscall_open_kernel_path(state_ptr, current_task, a0, a1, a2)
+
+    if number == syscall_read_number():
+        if scheduler_task_mode(state_ptr, current_task) == task_mode_user():
+            return syscall_read_user_buffer(state_ptr, current_task, a0, a1, a2)
+        return syscall_read_kernel_buffer(state_ptr, current_task, a0, a1, a2)
 
     if number == syscall_getpid_number():
         return current_task
@@ -107,6 +204,9 @@ def syscall_dispatch(number: int, a0: int, a1: int, a2: int, a3: int, a4: int, a
     if number == syscall_spawn_user_demo_number():
         return scheduler_create_user_task(state_ptr, 100 + scheduler_runnable_count(state_ptr))
 
+    if number == syscall_close_number():
+        return syscall_close_fd(state_ptr, current_task, a0)
+
     panic("unknown syscall number".c_str())
 
 
@@ -116,6 +216,10 @@ def sys_write(msg: cobj):
 
 def sys_write_u64(value: int):
     console_write_u64(value)
+
+
+def sys_write_fd_ptr(fd: int, ptr: int, length: int):
+    return invoke_syscall(syscall_write_number(), fd, ptr, length, 0, 0)
 
 
 def sys_getpid():
@@ -142,6 +246,18 @@ def sys_spawn_user_demo():
     return invoke_syscall(syscall_spawn_user_demo_number(), 0, 0, 0, 0, 0)
 
 
+def sys_close(fd: int):
+    return invoke_syscall(syscall_close_number(), fd, 0, 0, 0, 0)
+
+
+def sys_open_ptr(path_ptr: int, path_len: int, flags: int):
+    return invoke_syscall(syscall_open_number(), path_ptr, path_len, flags, 0, 0)
+
+
+def sys_read(fd: int, ptr: int, length: int):
+    return invoke_syscall(syscall_read_number(), fd, ptr, length, 0, 0)
+
+
 @export
 def syscall_entry(number: int, a0: int, a1: int, a2: int, a3: int, a4: int):
     return syscall_dispatch(number, a0, a1, a2, a3, a4, 0)
@@ -152,4 +268,5 @@ def syscall_self_test():
     console_write_label_u64("sys.pid=".c_str(), sys_getpid())
     console_write_label_u64("sys.ticks=".c_str(), sys_clock_ticks())
     console_write_label_u64("sys.runnable=".c_str(), scheduler_runnable_count(active_scheduler_state()))
+    console_write_label_u64("sys.close.bad=".c_str(), sys_close(3))
     console_write_line("syscall self-test ok".c_str())

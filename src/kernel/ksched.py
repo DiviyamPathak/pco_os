@@ -12,13 +12,19 @@ from khal import user_demo_entry_addr
 from khal import user_task_trampoline_addr
 from kmemory import copy_page
 from kmemory import pmm_alloc_page
+from kmemory import pmm_free_page
 from kmemory import vmm_clone_kernel_address_space
+from kmemory import vmm_free_cloned_address_space
 from kmemory import vmm_map_page_root
 from kmemory import vmm_state_qword
 from kmemory import vmm_unmap_page_root
 from kmemory import zero_page
+from kvfs import vfs_alloc_console_in_descriptor
+from kvfs import vfs_alloc_console_out_descriptor
+from kvfs import vfs_close_descriptor
 from ksupport import align_down
 from ksupport import alloc_bytes
+from ksupport import store_byte_region
 from ksupport import load_qword_region
 from ksupport import panic
 from ksupport import store_qword_region
@@ -110,8 +116,36 @@ def task_slot_user_limit():
     return 12
 
 
-def task_slot_limit():
+def task_slot_user_code_phys():
     return 13
+
+
+def task_slot_user_data_phys():
+    return 14
+
+
+def task_slot_user_stack_phys():
+    return 15
+
+
+def task_slot_fd0_kind():
+    return 16
+
+
+def task_slot_fd1_kind():
+    return 17
+
+
+def task_slot_fd2_kind():
+    return 18
+
+
+def task_slot_fd3_kind():
+    return 19
+
+
+def task_slot_limit():
+    return 20
 
 
 def task_state_empty():
@@ -136,6 +170,18 @@ def task_mode_kernel():
 
 def task_mode_user():
     return 1
+
+
+def task_fd_kind_closed():
+    return 0
+
+
+def task_fd_kind_console_in():
+    return 1
+
+
+def task_fd_kind_console_out():
+    return 2
 
 
 def max_tasks():
@@ -230,8 +276,12 @@ def sched_slot_vmm_state():
     return 13
 
 
-def sched_slot_limit():
+def sched_slot_vfs_state():
     return 14
+
+
+def sched_slot_limit():
+    return 15
 
 
 def scheduler_state_qword(state_ptr: int, slot: int):
@@ -358,12 +408,28 @@ def scheduler_task_user_limit(state_ptr: int, task_id: int):
     return scheduler_task_qword(scheduler_task_table_ptr(state_ptr), task_id, task_slot_user_limit())
 
 
+def scheduler_task_user_code_phys(state_ptr: int, task_id: int):
+    return scheduler_task_qword(scheduler_task_table_ptr(state_ptr), task_id, task_slot_user_code_phys())
+
+
+def scheduler_task_user_data_phys(state_ptr: int, task_id: int):
+    return scheduler_task_qword(scheduler_task_table_ptr(state_ptr), task_id, task_slot_user_data_phys())
+
+
+def scheduler_task_user_stack_phys(state_ptr: int, task_id: int):
+    return scheduler_task_qword(scheduler_task_table_ptr(state_ptr), task_id, task_slot_user_stack_phys())
+
+
 def scheduler_pmm_state(state_ptr: int):
     return scheduler_state_qword(state_ptr, sched_slot_pmm_state())
 
 
 def scheduler_vmm_state(state_ptr: int):
     return scheduler_state_qword(state_ptr, sched_slot_vmm_state())
+
+
+def scheduler_vfs_state(state_ptr: int):
+    return scheduler_state_qword(state_ptr, sched_slot_vfs_state())
 
 
 def scheduler_set_task_state(state_ptr: int, task_id: int, value: int):
@@ -378,7 +444,67 @@ def scheduler_set_task_exit_code(state_ptr: int, task_id: int, value: int):
     set_scheduler_task_qword(scheduler_task_table_ptr(state_ptr), task_id, task_slot_exit_code(), value)
 
 
-def scheduler_set_task(task_table_ptr: int, task_id: int, state: int, name_tag: int, ctx_ptr: int, stack_base: int, mode: int, cr3: int, user_base: int, user_limit: int):
+def task_fd_slot(fd: int):
+    if fd == 0:
+        return task_slot_fd0_kind()
+    if fd == 1:
+        return task_slot_fd1_kind()
+    if fd == 2:
+        return task_slot_fd2_kind()
+    if fd == 3:
+        return task_slot_fd3_kind()
+    return -1
+
+
+def scheduler_task_fd_object(state_ptr: int, task_id: int, fd: int):
+    slot = task_fd_slot(fd)
+    if slot < 0:
+        return 0
+    return scheduler_task_qword(scheduler_task_table_ptr(state_ptr), task_id, slot)
+
+
+def scheduler_set_task_fd_object(state_ptr: int, task_id: int, fd: int, desc_id: int):
+    slot = task_fd_slot(fd)
+    if slot < 0:
+        panic("task fd out of range".c_str())
+    set_scheduler_task_qword(scheduler_task_table_ptr(state_ptr), task_id, slot, desc_id)
+
+
+def scheduler_init_task_fds(state_ptr: int, task_id: int):
+    vfs_state = scheduler_vfs_state(state_ptr)
+    fd0 = vfs_alloc_console_in_descriptor(vfs_state)
+    fd1 = vfs_alloc_console_out_descriptor(vfs_state)
+    fd2 = vfs_alloc_console_out_descriptor(vfs_state)
+
+    if fd0 == 0 or fd1 == 0 or fd2 == 0:
+        panic("task fd alloc failed".c_str())
+
+    scheduler_set_task_fd_object(state_ptr, task_id, 0, fd0)
+    scheduler_set_task_fd_object(state_ptr, task_id, 1, fd1)
+    scheduler_set_task_fd_object(state_ptr, task_id, 2, fd2)
+    scheduler_set_task_fd_object(state_ptr, task_id, 3, 0)
+
+
+def scheduler_release_task_fds(state_ptr: int, task_id: int):
+    vfs_state = scheduler_vfs_state(state_ptr)
+    fd = 0
+    while fd < 4:
+        desc_id = scheduler_task_fd_object(state_ptr, task_id, fd)
+        if desc_id != 0:
+            vfs_close_descriptor(vfs_state, desc_id)
+            scheduler_set_task_fd_object(state_ptr, task_id, fd, 0)
+        fd += 1
+
+
+def scheduler_clear_task(task_table_ptr: int, task_id: int):
+    slot = 0
+    while slot < task_slot_limit():
+        set_scheduler_task_qword(task_table_ptr, task_id, slot, 0)
+        slot += 1
+
+
+def scheduler_set_task(state_ptr: int, task_id: int, state: int, name_tag: int, ctx_ptr: int, stack_base: int, mode: int, cr3: int, user_base: int, user_limit: int, user_code_phys: int, user_data_phys: int, user_stack_phys: int):
+    task_table_ptr = scheduler_task_table_ptr(state_ptr)
     set_scheduler_task_qword(task_table_ptr, task_id, task_slot_id(), task_id)
     set_scheduler_task_qword(task_table_ptr, task_id, task_slot_state(), state)
     set_scheduler_task_qword(task_table_ptr, task_id, task_slot_runtime_ticks(), 0)
@@ -392,6 +518,10 @@ def scheduler_set_task(task_table_ptr: int, task_id: int, state: int, name_tag: 
     set_scheduler_task_qword(task_table_ptr, task_id, task_slot_cr3(), cr3)
     set_scheduler_task_qword(task_table_ptr, task_id, task_slot_user_base(), user_base)
     set_scheduler_task_qword(task_table_ptr, task_id, task_slot_user_limit(), user_limit)
+    set_scheduler_task_qword(task_table_ptr, task_id, task_slot_user_code_phys(), user_code_phys)
+    set_scheduler_task_qword(task_table_ptr, task_id, task_slot_user_data_phys(), user_data_phys)
+    set_scheduler_task_qword(task_table_ptr, task_id, task_slot_user_stack_phys(), user_stack_phys)
+    scheduler_init_task_fds(state_ptr, task_id)
 
 
 def scheduler_prepare_kernel_task_context(task_id: int):
@@ -429,11 +559,10 @@ def scheduler_prepare_user_task_context(task_id: int, user_rip: int, user_rsp: i
 
 
 def scheduler_write_cstring(dst_ptr: int, offset: int, msg: cobj):
-    dst = Ptr[byte](dst_ptr + offset)
     i = 0
     while True:
         ch = msg[i]
-        dst[i] = ch
+        store_byte_region(dst_ptr + offset, 4096 - offset, i, ch)
         if ch == byte(0):
             return
         i += 1
@@ -477,15 +606,54 @@ def scheduler_record_switch(state_ptr: int, task_id: int):
 
 
 def scheduler_find_free_task_id(state_ptr: int):
-    task_id = scheduler_task_count(state_ptr)
-    if task_id >= max_tasks():
+    task_id = 0
+    limit = scheduler_task_count(state_ptr)
+    while task_id < limit:
+        if scheduler_task_state(state_ptr, task_id) == task_state_empty():
+            return task_id
+        task_id += 1
+
+    if limit >= max_tasks():
         panic("scheduler task table full".c_str())
-    return task_id
+    return limit
+
+
+def scheduler_destroy_user_task(state_ptr: int, task_id: int):
+    if scheduler_task_mode(state_ptr, task_id) != task_mode_user():
+        return
+
+    pmm_state = scheduler_pmm_state(state_ptr)
+    vmm_state = scheduler_vmm_state(state_ptr)
+    root_p4 = scheduler_task_cr3(state_ptr, task_id)
+    code_phys = scheduler_task_user_code_phys(state_ptr, task_id)
+    data_phys = scheduler_task_user_data_phys(state_ptr, task_id)
+    stack_phys = scheduler_task_user_stack_phys(state_ptr, task_id)
+
+    if code_phys != 0:
+        pmm_free_page(pmm_state, code_phys)
+    if data_phys != 0:
+        pmm_free_page(pmm_state, data_phys)
+    if stack_phys != 0:
+        pmm_free_page(pmm_state, stack_phys)
+    if root_p4 != 0:
+        vmm_free_cloned_address_space(vmm_state, pmm_state, root_p4)
+
+
+def scheduler_release_task_slot(state_ptr: int, task_id: int):
+    task_table_ptr = scheduler_task_table_ptr(state_ptr)
+    scheduler_release_task_fds(state_ptr, task_id)
+    scheduler_clear_task(task_table_ptr, task_id)
+
+    task_count = scheduler_task_count(state_ptr)
+    while task_count > 0:
+        if scheduler_task_state(state_ptr, task_count - 1) != task_state_empty():
+            break
+        task_count -= 1
+    set_scheduler_state_qword(state_ptr, sched_slot_task_count(), task_count)
 
 
 def scheduler_create_user_task(state_ptr: int, name_tag: int):
     task_id = scheduler_find_free_task_id(state_ptr)
-    task_table_ptr = scheduler_task_table_ptr(state_ptr)
     pmm_state = scheduler_pmm_state(state_ptr)
     vmm_state = scheduler_vmm_state(state_ptr)
     user_cr3 = vmm_clone_kernel_address_space(vmm_state, pmm_state)
@@ -501,9 +669,7 @@ def scheduler_create_user_task(state_ptr: int, name_tag: int):
 
     copy_page(code_src_phys, code_phys)
     zero_page(data_phys)
-    scheduler_write_cstring(data_phys, 0, "user task start\n".c_str())
-    scheduler_write_cstring(data_phys, 32, "user task yield\n".c_str())
-    scheduler_write_cstring(data_phys, 64, "user task exit=42\n".c_str())
+    scheduler_write_cstring(data_phys, 0, "/hello.txt".c_str())
     vmm_unmap_page_root(vmm_state, user_cr3, pmm_state, user_task_code_virt(task_id))
     vmm_unmap_page_root(vmm_state, user_cr3, pmm_state, user_task_stack_virt(task_id))
     vmm_unmap_page_root(vmm_state, user_cr3, pmm_state, user_task_data_virt(task_id))
@@ -512,21 +678,21 @@ def scheduler_create_user_task(state_ptr: int, name_tag: int):
     vmm_map_page_root(vmm_state, user_cr3, pmm_state, user_task_data_virt(task_id), data_phys, 0x005)
 
     ctx_ptr, stack_base = scheduler_prepare_user_task_context(task_id, user_task_code_virt(task_id), user_task_stack_top(task_id))
-    scheduler_set_task(task_table_ptr, task_id, task_state_runnable(), name_tag, ctx_ptr, stack_base, task_mode_user(), user_cr3, user_base, user_limit)
-    set_scheduler_state_qword(state_ptr, sched_slot_task_count(), task_id + 1)
+    scheduler_set_task(state_ptr, task_id, task_state_runnable(), name_tag, ctx_ptr, stack_base, task_mode_user(), user_cr3, user_base, user_limit, code_phys, data_phys, stack_phys)
+    if task_id >= scheduler_task_count(state_ptr):
+        set_scheduler_state_qword(state_ptr, sched_slot_task_count(), task_id + 1)
     scheduler_enqueue_task(state_ptr, task_id)
     return task_id
 
 
 def scheduler_init_bootstrap_tasks(state_ptr: int, pmm_state: int, vmm_state: int):
-    task_table_ptr = scheduler_task_table_ptr(state_ptr)
     kernel_cr3 = vmm_state_qword(vmm_state, 1)
 
     idle_ctx_ptr, idle_stack_base = scheduler_prepare_kernel_task_context(0)
     task1_ctx_ptr, task1_stack_base = scheduler_prepare_kernel_task_context(1)
 
-    scheduler_set_task(task_table_ptr, 0, task_state_runnable(), 0, idle_ctx_ptr, idle_stack_base, task_mode_kernel(), kernel_cr3, 0, 0)
-    scheduler_set_task(task_table_ptr, 1, task_state_runnable(), 1, task1_ctx_ptr, task1_stack_base, task_mode_kernel(), kernel_cr3, 0, 0)
+    scheduler_set_task(state_ptr, 0, task_state_runnable(), 0, idle_ctx_ptr, idle_stack_base, task_mode_kernel(), kernel_cr3, 0, 0, 0, 0, 0)
+    scheduler_set_task(state_ptr, 1, task_state_runnable(), 1, task1_ctx_ptr, task1_stack_base, task_mode_kernel(), kernel_cr3, 0, 0, 0, 0, 0)
 
     set_scheduler_state_qword(state_ptr, sched_slot_task_count(), 2)
     set_scheduler_state_qword(state_ptr, sched_slot_current_task(), 1)
@@ -536,7 +702,7 @@ def scheduler_init_bootstrap_tasks(state_ptr: int, pmm_state: int, vmm_state: in
     scheduler_record_switch(state_ptr, 1)
 
 
-def init_scheduler(pmm_state: int, vmm_state: int):
+def init_scheduler(pmm_state: int, vmm_state: int, vfs_state: int):
     state_ptr = alloc_bytes(sched_slot_limit() * 8)
     task_table_ptr = alloc_bytes(max_tasks() * task_slot_limit() * 8)
     ready_queue_ptr = alloc_bytes(ready_queue_capacity() * 8)
@@ -556,6 +722,12 @@ def init_scheduler(pmm_state: int, vmm_state: int):
     set_scheduler_state_qword(state_ptr, sched_slot_ready_tail(), 0)
     set_scheduler_state_qword(state_ptr, sched_slot_pmm_state(), pmm_state)
     set_scheduler_state_qword(state_ptr, sched_slot_vmm_state(), vmm_state)
+    set_scheduler_state_qword(state_ptr, sched_slot_vfs_state(), vfs_state)
+
+    task_id = 0
+    while task_id < max_tasks():
+        scheduler_clear_task(task_table_ptr, task_id)
+        task_id += 1
 
     scheduler_init_bootstrap_tasks(state_ptr, pmm_state, vmm_state)
     set_active_scheduler(state_ptr)
@@ -643,11 +815,18 @@ def scheduler_exit_current_task(state_ptr: int, exit_code: int):
 def scheduler_waitpid(state_ptr: int, task_id: int):
     if task_id < 0 or task_id >= scheduler_task_count(state_ptr):
         panic("waitpid task id out of range".c_str())
+    if task_id == scheduler_current_task(state_ptr):
+        panic("waitpid cannot target self".c_str())
+    if scheduler_task_state(state_ptr, task_id) == task_state_empty():
+        panic("waitpid task slot empty".c_str())
 
     while scheduler_task_state(state_ptr, task_id) != task_state_exited():
         scheduler_yield_current_task(state_ptr)
 
-    return scheduler_task_exit_code(state_ptr, task_id)
+    status = scheduler_task_exit_code(state_ptr, task_id)
+    scheduler_destroy_user_task(state_ptr, task_id)
+    scheduler_release_task_slot(state_ptr, task_id)
+    return status
 
 
 def scheduler_runnable_count(state_ptr: int):

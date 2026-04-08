@@ -314,8 +314,27 @@ user_demo_entry_asm:
     dec ecx
     jnz .yield_loop
 
-    lea rdi, [r14 + 64]
+    lea rdi, [r14 + 0]
+    mov esi, 10
+    xor edx, edx
+    mov eax, 9
+    int 0x80
+
+    mov ebx, eax
+    mov edi, eax
+    lea rsi, [r14 + 128]
+    mov edx, 64
+    mov eax, 10
+    int 0x80
+
+    mov edx, eax
+    mov edi, 1
+    lea rsi, [r14 + 128]
     mov eax, 1
+    int 0x80
+
+    mov edi, ebx
+    mov eax, 8
     int 0x80
 
     mov edi, 42

@@ -309,15 +309,50 @@ def vmm_clone_kernel_address_space(state_ptr: int, pmm_state: int):
     while table_index < p2_count:
         src_p2 = align_down(page_table_qword(src_p3, table_index), 4096)
         dst_p2 = pmm_alloc_page(pmm_state)
+        entry_index = 0
         if dst_p2 == 0:
             panic("vmm clone p2 alloc failed".c_str())
-        copy_page_table(src_p2, dst_p2)
+
+        zero_page(dst_p2)
+        while entry_index < 512:
+            src_entry = page_table_qword(src_p2, entry_index)
+            if (src_entry & 1) == 0 or (src_entry & 0x80) != 0:
+                set_page_table_qword(dst_p2, entry_index, src_entry)
+            else:
+                src_pt = align_down(src_entry, 4096)
+                dst_pt = pmm_alloc_page(pmm_state)
+                if dst_pt == 0:
+                    panic("vmm clone pt alloc failed".c_str())
+                copy_page(src_pt, dst_pt)
+                set_page_table_qword(dst_p2, entry_index, dst_pt | (src_entry & 0xFFF))
+            entry_index += 1
+
         set_page_table_qword(dst_p3, table_index, dst_p2 | 0x003)
         table_index += 1
 
     if read_cr3() == src_p4:
         load_cr3(src_p4)
     return dst_p4
+
+
+def vmm_free_cloned_address_space(state_ptr: int, pmm_state: int, root_p4: int):
+    p3_ptr = vmm_root_p3_ptr(root_p4)
+    table_index = 0
+    while table_index < vmm_state_qword(state_ptr, 3):
+        p2_entry = page_table_qword(p3_ptr, table_index)
+        if (p2_entry & 1) != 0:
+            p2_ptr = align_down(p2_entry, 4096)
+            entry_index = 0
+            while entry_index < 512:
+                p2_leaf = page_table_qword(p2_ptr, entry_index)
+                if (p2_leaf & 1) != 0 and (p2_leaf & 0x80) == 0:
+                    pmm_free_page(pmm_state, align_down(p2_leaf, 4096))
+                entry_index += 1
+            pmm_free_page(pmm_state, p2_ptr)
+        table_index += 1
+
+    pmm_free_page(pmm_state, p3_ptr)
+    pmm_free_page(pmm_state, root_p4)
 
 
 def vmm_supports_addr(state_ptr: int, virt: int):

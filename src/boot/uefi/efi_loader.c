@@ -41,7 +41,7 @@ typedef struct {
 } EFI_GUID;
 
 typedef struct {
-    UINT64 Signature[21];
+    UINT64 Signature[23];
 } BOOT_INFO_BLOCK;
 
 typedef struct {
@@ -425,6 +425,63 @@ static EFI_STATUS read_entire_file(EFI_SYSTEM_TABLE *system_table, EFI_FILE_PROT
     return EFI_SUCCESS;
 }
 
+static EFI_STATUS read_entire_file_pages(EFI_SYSTEM_TABLE *system_table, EFI_FILE_PROTOCOL *root, CHAR16 *path, VOID **buffer, UINTN *buffer_size) {
+    EFI_STATUS status;
+    EFI_FILE_PROTOCOL *file;
+    UINT8 info_buffer[512];
+    UINTN info_size;
+    EFI_FILE_INFO *info;
+    UINTN read_size;
+    EFI_PHYSICAL_ADDRESS file_addr;
+
+    file = NULL;
+    info_size = sizeof(info_buffer);
+    file_addr = 0;
+
+    status = root->Open(root, &file, path, EFI_FILE_MODE_READ, 0);
+    if (EFI_ERROR(status)) {
+        return status;
+    }
+
+    status = file->GetInfo(file, &gFileInfoGuid, &info_size, info_buffer);
+    if (EFI_ERROR(status)) {
+        file->Close(file);
+        return status;
+    }
+
+    info = (EFI_FILE_INFO *)info_buffer;
+    *buffer_size = (UINTN)info->FileSize;
+    if (*buffer_size == 0) {
+        file->Close(file);
+        return EFI_LOAD_ERROR;
+    }
+
+    status = system_table->BootServices->AllocatePages(AllocateAnyPages,
+                                                       EfiLoaderData,
+                                                       (UINTN)align_up(*buffer_size, 4096) / 4096,
+                                                       &file_addr);
+    if (EFI_ERROR(status)) {
+        file->Close(file);
+        return status;
+    }
+
+    status = file->SetPosition(file, 0);
+    if (EFI_ERROR(status)) {
+        file->Close(file);
+        return status;
+    }
+
+    read_size = *buffer_size;
+    status = file->Read(file, &read_size, (VOID *)(UINTN)file_addr);
+    file->Close(file);
+    if (EFI_ERROR(status) || read_size != *buffer_size) {
+        return EFI_LOAD_ERROR;
+    }
+
+    *buffer = (VOID *)(UINTN)file_addr;
+    return EFI_SUCCESS;
+}
+
 static EFI_STATUS find_bootmeta(VOID *kernel_file, UINTN kernel_file_size, UINT64 *entry64) {
     const UINT8 *file_bytes;
     const Elf64_Ehdr *ehdr;
@@ -590,10 +647,12 @@ static VOID fill_boot_info(BOOT_INFO_BLOCK *boot_info,
                            MEMORY_REGION *regions,
                            UINT64 region_count,
                            UINT64 kernel_phys_base,
-                           UINT64 kernel_phys_end) {
+                           UINT64 kernel_phys_end,
+                           VOID *initramfs_ptr,
+                           UINT64 initramfs_size) {
     UINTN i;
 
-    for (i = 0; i < 21; ++i) {
+    for (i = 0; i < 23; ++i) {
         boot_info->Signature[i] = 0;
     }
 
@@ -618,6 +677,8 @@ static VOID fill_boot_info(BOOT_INFO_BLOCK *boot_info,
     boot_info->Signature[18] = 1;
     boot_info->Signature[19] = 0;
     boot_info->Signature[20] = 0;
+    boot_info->Signature[21] = (UINT64)(UINTN)initramfs_ptr;
+    boot_info->Signature[22] = initramfs_size;
 }
 
 typedef void (*KERNEL_ENTRY64)(UINT64);
@@ -627,6 +688,8 @@ EFI_STATUS efi_main_body(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table
     EFI_FILE_PROTOCOL *root;
     VOID *kernel_file;
     UINTN kernel_file_size;
+    VOID *initramfs_file;
+    UINTN initramfs_file_size;
     UINT64 entry64;
     UINT64 kernel_phys_base;
     UINT64 kernel_phys_end;
@@ -645,6 +708,8 @@ EFI_STATUS efi_main_body(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table
     root = NULL;
     kernel_file = NULL;
     kernel_file_size = 0;
+    initramfs_file = NULL;
+    initramfs_file_size = 0;
     entry64 = 0;
     kernel_phys_base = 0;
     kernel_phys_end = 0;
@@ -665,9 +730,16 @@ EFI_STATUS efi_main_body(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table
     }
 
     status = read_entire_file(system_table, root, L"\\KERNEL.ELF", &kernel_file, &kernel_file_size);
+    if (EFI_ERROR(status)) {
+        root->Close(root);
+        efi_puts(system_table, L"read kernel failed\r\n");
+        return status;
+    }
+
+    status = read_entire_file_pages(system_table, root, L"\\INITRAMFS.BIN", &initramfs_file, &initramfs_file_size);
     root->Close(root);
     if (EFI_ERROR(status)) {
-        efi_puts(system_table, L"read kernel failed\r\n");
+        efi_puts(system_table, L"read initramfs failed\r\n");
         return status;
     }
 
@@ -734,7 +806,7 @@ EFI_STATUS efi_main_body(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table
         }
 
         boot_info = (BOOT_INFO_BLOCK *)(UINTN)boot_info_addr;
-        fill_boot_info(boot_info, regions, region_count, kernel_phys_base, kernel_phys_end);
+        fill_boot_info(boot_info, regions, region_count, kernel_phys_base, kernel_phys_end, initramfs_file, (UINT64)initramfs_file_size);
 
         status = system_table->BootServices->ExitBootServices(image_handle, map_key);
         if (status == EFI_INVALID_PARAMETER) {

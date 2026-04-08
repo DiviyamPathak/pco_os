@@ -10,7 +10,7 @@ from ksupport import panic
 
 
 def boot_info_qword(boot_info_ptr: int, slot: int):
-    return load_qword_region(boot_info_ptr, 21, slot)
+    return load_qword_region(boot_info_ptr, 23, slot)
 
 
 def boot_memory_map_qword(entry_ptr: int, slot: int):
@@ -73,4 +73,6 @@ def dump_boot_info(boot_info_ptr: int):
     console_write_label_u64("boot.cpu.current_apic=".c_str(), read_apic_id())
     console_write_label_hex("boot.raw.ptr=".c_str(), boot_info_qword(boot_info_ptr, 19))
     console_write_label_hex("boot.raw.magic=".c_str(), boot_info_qword(boot_info_ptr, 20))
+    console_write_label_hex("boot.initramfs.ptr=".c_str(), boot_info_qword(boot_info_ptr, 21))
+    console_write_label_u64("boot.initramfs.size=".c_str(), boot_info_qword(boot_info_ptr, 22))
     dump_boot_memory_map(boot_info_ptr)

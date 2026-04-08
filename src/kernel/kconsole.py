@@ -1,4 +1,6 @@
 from khal import serial_write_byte
+from ksupport import load_byte
+from ksupport import load_byte_region
 
 
 def print_msg(msg: cobj, line: int, color: int):
@@ -32,11 +34,21 @@ def console_write(msg: cobj):
 
 
 def console_write_ptr(ptr: int):
-    msg = Ptr[byte](ptr)
     i = 0
-    while msg[i] != byte(0):
-        console_put_byte(msg[i])
+    while byte(load_byte(ptr + i)) != byte(0):
+        console_put_byte(byte(load_byte(ptr + i)))
         i += 1
+
+
+def console_write_ptr_len(ptr: int, length: int):
+    if ptr == 0 or length <= 0:
+        return 0
+
+    i = 0
+    while i < length:
+        console_put_byte(byte(load_byte_region(ptr, length, i)))
+        i += 1
+    return i
 
 
 def console_write_line(msg: cobj):

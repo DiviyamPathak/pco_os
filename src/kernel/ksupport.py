@@ -1,7 +1,9 @@
 from khal import frame_qword
+from khal import load_byte
 from khal import load_dword
 from khal import seq_alloc_atomic
 from khal import seq_terminate
+from khal import store_byte
 from khal import store_dword
 from khal import store_qword
 from kconsole import console_write
@@ -77,6 +79,16 @@ def load_dword_region(base_ptr: int, byte_count: int, offset: int):
     return load_dword(base_ptr + offset)
 
 
+def load_byte_region(base_ptr: int, byte_count: int, offset: int):
+    if base_ptr == 0:
+        panic("byte region base is null".c_str())
+    if byte_count <= 0:
+        panic("byte region is empty".c_str())
+    if offset < 0 or offset >= byte_count:
+        panic_region_access("byte offset out of range".c_str(), base_ptr, offset, byte_count)
+    return load_byte(base_ptr + offset)
+
+
 def store_dword_region(base_ptr: int, byte_count: int, offset: int, value: int):
     if base_ptr == 0:
         panic("dword region base is null".c_str())
@@ -89,6 +101,16 @@ def store_dword_region(base_ptr: int, byte_count: int, offset: int, value: int):
     if offset < 0 or offset + 4 > byte_count:
         panic_region_access("dword offset out of range".c_str(), base_ptr, offset, byte_count)
     store_dword(base_ptr + offset, value)
+
+
+def store_byte_region(base_ptr: int, byte_count: int, offset: int, value: int):
+    if base_ptr == 0:
+        panic("byte region base is null".c_str())
+    if byte_count <= 0:
+        panic("byte region is empty".c_str())
+    if offset < 0 or offset >= byte_count:
+        panic_region_access("byte offset out of range".c_str(), base_ptr, offset, byte_count)
+    store_byte(base_ptr + offset, value)
 
 
 def alloc_bytes(size: int):

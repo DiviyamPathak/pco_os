@@ -22,6 +22,8 @@ from C import read_apic_id() -> int
 from C import cpu_has_apic() -> int
 from C import read_msr_asm(int) -> int
 from C import write_msr_asm(int, int)
+from C import load_byte_asm(int) -> int
+from C import store_byte_asm(int, int)
 from C import load_dword_asm(int) -> int
 from C import store_dword_asm(int, int)
 from C import outb_asm(int, int)
@@ -72,8 +74,16 @@ def load_dword(addr: int):
     return load_dword_asm(addr)
 
 
+def load_byte(addr: int):
+    return load_byte_asm(addr)
+
+
 def store_dword(addr: int, value: int):
     store_dword_asm(addr, value)
+
+
+def store_byte(addr: int, value: int):
+    store_byte_asm(addr, value)
 
 
 def outb(port: int, value: int):

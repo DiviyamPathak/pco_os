@@ -10,6 +10,7 @@ AS = nasm
 LD = ld
 CC = gcc
 OBJCOPY = objcopy
+PYTHON = python3
 
 # Directories
 ARCH_DIR = src/arch/$(ARCH)
@@ -17,6 +18,7 @@ BOOT_DIR = src/boot
 UEFI_SRC_DIR = $(BOOT_DIR)/uefi
 GRUB_SRC_DIR = $(BOOT_DIR)/grub
 KERNEL_DIR = src/kernel
+INITRAMFS_DIR = initramfs
 BUILD_DIR = build
 PROJECT_NAME ?= $(notdir $(CURDIR))
 
@@ -26,6 +28,7 @@ RUNTIME_SRC = $(ARCH_DIR)/runtime.s
 INTERRUPTS_SRC = $(ARCH_DIR)/interrupts.s
 KERNEL_SRC = $(KERNEL_DIR)/kernel.py
 KERNEL_PY_SRCS = $(wildcard $(KERNEL_DIR)/*.py)
+INITRAMFS_SRCS = $(shell find $(INITRAMFS_DIR) -type f 2>/dev/null | sort)
 EFI_LOADER_SRC = $(UEFI_SRC_DIR)/efi_loader.c
 EFI_ENTRY_SRC = $(UEFI_SRC_DIR)/efi_entry.S
 GRUB_CFG = $(GRUB_SRC_DIR)/grub.cfg
@@ -73,6 +76,7 @@ ISO_KERNEL = $(ISO_BOOT_DIR)/$(KERNEL_IMAGE)
 ISO_IMAGE = $(BUILD_DIR)/$(ISO_NAME).iso
 EFI_APP = $(BUILD_DIR)/BOOTX64.EFI
 UEFI_DISK = $(BUILD_DIR)/$(UEFI_DISK_NAME).img
+INITRAMFS_IMAGE = $(BUILD_DIR)/initramfs.bin
 
 $(KERNEL_ELF): $(OBJS) $(LDSCRIPT)
 	$(LD) $(LDFLAGS) -T $(LDSCRIPT) -o $@ $(OBJS)
@@ -103,13 +107,17 @@ $(EFI_APP): $(EFI_ENTRY_OBJ) $(EFI_LOADER_OBJ)
 	$(LD) $(EFI_LDFLAGS) -o $@ $(EFI_ENTRY_OBJ) $(EFI_LOADER_OBJ)
 	$(OBJCOPY) --remove-section .comment --remove-section .eh_frame --remove-section .note.gnu.property $@
 
-$(UEFI_DISK): $(EFI_APP) $(KERNEL_ELF)
+$(INITRAMFS_IMAGE): scripts/build-initramfs.py $(INITRAMFS_SRCS)
+	$(PYTHON) scripts/build-initramfs.py $(INITRAMFS_DIR) $@
+
+$(UEFI_DISK): $(EFI_APP) $(KERNEL_ELF) $(INITRAMFS_IMAGE)
 	@rm -f $@
 	mformat -C -f 2880 -i $@ ::
 	mmd -i $@ ::/EFI
 	mmd -i $@ ::/EFI/BOOT
 	mcopy -i $@ $(EFI_APP) ::/EFI/BOOT/BOOTX64.EFI
 	mcopy -i $@ $(KERNEL_ELF) ::/KERNEL.ELF
+	mcopy -i $@ $(INITRAMFS_IMAGE) ::/INITRAMFS.BIN
 
 $(KERNEL_LL): $(KERNEL_PY_SRCS)
 	@mkdir -p $(BUILD_DIR)
