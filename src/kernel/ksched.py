@@ -24,7 +24,6 @@ from kvfs import vfs_alloc_console_out_descriptor
 from kvfs import vfs_close_descriptor
 from ksupport import align_down
 from ksupport import alloc_bytes
-from ksupport import store_byte_region
 from ksupport import load_qword_region
 from ksupport import panic
 from ksupport import store_qword_region
@@ -559,11 +558,11 @@ def scheduler_prepare_user_task_context(task_id: int, user_rip: int, user_rsp: i
 
 
 def scheduler_write_cstring(dst_ptr: int, offset: int, msg: cobj):
+    dst = Ptr[byte](dst_ptr + offset)
     i = 0
     while True:
-        ch = msg[i]
-        store_byte_region(dst_ptr + offset, 4096 - offset, i, ch)
-        if ch == byte(0):
+        dst[i] = msg[i]
+        if msg[i] == byte(0):
             return
         i += 1
 

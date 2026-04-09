@@ -2,6 +2,7 @@ from kboot import boot_info_qword
 from kconsole import console_write
 from kconsole import console_write_label_hex
 from kconsole import console_write_label_u64
+from kconsole import console_read_ptr_len
 from kconsole import console_write_line
 from kconsole import console_write_ptr_len
 from ksupport import alloc_bytes
@@ -65,8 +66,12 @@ def node_slot_data_len():
     return 3
 
 
-def node_slot_limit():
+def node_slot_kind():
     return 4
+
+
+def node_slot_limit():
+    return 5
 
 
 def desc_slot_kind():
@@ -103,6 +108,18 @@ def desc_kind_console_out():
 
 def desc_kind_initramfs_file():
     return 3
+
+
+def desc_kind_directory():
+    return 4
+
+
+def vfs_node_kind_file():
+    return 1
+
+
+def vfs_node_kind_directory():
+    return 2
 
 
 def max_vfs_nodes():
@@ -201,6 +218,7 @@ def vfs_set_node(state_ptr: int, node_id: int, name_ptr: int, name_len: int, dat
     set_vfs_node_qword(state_ptr, node_id, node_slot_name_len(), name_len)
     set_vfs_node_qword(state_ptr, node_id, node_slot_data_ptr(), data_ptr)
     set_vfs_node_qword(state_ptr, node_id, node_slot_data_len(), data_len)
+    set_vfs_node_qword(state_ptr, node_id, node_slot_kind(), vfs_node_kind_file())
 
 
 def vfs_copy_initramfs_slice(base_ptr: int, offset: int, length: int, nul_terminate: bool):
@@ -215,7 +233,7 @@ def vfs_copy_initramfs_slice(base_ptr: int, offset: int, length: int, nul_termin
         store_byte(dst + i, load_byte(base_ptr + offset + i))
         i += 1
     if nul_terminate:
-        store_byte(dst + length, byte(0))
+        store_byte(dst + length, 0)
     return dst
 
 
@@ -327,11 +345,17 @@ def vfs_alloc_console_out_descriptor(state_ptr: int):
     return vfs_alloc_descriptor(state_ptr, desc_kind_console_out(), 0, 0, 0)
 
 
+def vfs_alloc_directory_descriptor(state_ptr: int, offset: int):
+    return vfs_alloc_descriptor(state_ptr, desc_kind_directory(), 0, 0, offset)
+
+
 def vfs_open_path(state_ptr: int, path_ptr: int, path_len: int, flags: int):
     if flags != 0:
         return 0
     if path_ptr == 0 or path_len <= 0:
         return 0
+    if path_len == 1 and byte(load_byte_region(path_ptr, path_len, 0)) == byte(47):
+        return vfs_alloc_directory_descriptor(state_ptr, 0)
 
     node_id = vfs_lookup_path(state_ptr, path_ptr, path_len)
     if node_id < 0:
@@ -340,6 +364,8 @@ def vfs_open_path(state_ptr: int, path_ptr: int, path_len: int, flags: int):
 
 
 def vfs_open_cstring(state_ptr: int, path: cobj):
+    if path[0] == byte(47) and path[1] == byte(0):
+        return vfs_alloc_directory_descriptor(state_ptr, 0)
     node_id = vfs_lookup_cstring(state_ptr, path)
     if node_id < 0:
         return 0
@@ -371,6 +397,56 @@ def vfs_write_descriptor(state_ptr: int, desc_id: int, ptr: int, length: int):
     return console_write_ptr_len(ptr, length)
 
 
+def vfs_stat_descriptor(state_ptr: int, desc_id: int, dst_ptr: int):
+    if desc_id <= 0 or dst_ptr == 0:
+        return -1
+
+    kind = vfs_desc_qword(state_ptr, desc_id, desc_slot_kind())
+    if kind == desc_kind_closed():
+        return -1
+    if kind == desc_kind_directory():
+        store_qword_region(dst_ptr, 2, 0, vfs_node_kind_directory())
+        store_qword_region(dst_ptr, 2, 1, vfs_state_qword(state_ptr, vfs_slot_node_count()))
+        return 0
+    if kind == desc_kind_initramfs_file():
+        node_id = vfs_desc_qword(state_ptr, desc_id, desc_slot_node_id())
+        store_qword_region(dst_ptr, 2, 0, vfs_node_qword(state_ptr, node_id, node_slot_kind()))
+        store_qword_region(dst_ptr, 2, 1, vfs_node_qword(state_ptr, node_id, node_slot_data_len()))
+        return 0
+    return -1
+
+
+def vfs_readdir_descriptor(state_ptr: int, desc_id: int, dst_ptr: int, length: int):
+    if desc_id <= 0:
+        return -1
+    if length < 0:
+        return -1
+    if dst_ptr == 0 and length != 0:
+        return -1
+
+    kind = vfs_desc_qword(state_ptr, desc_id, desc_slot_kind())
+    if kind != desc_kind_directory():
+        return -1
+
+    index = vfs_desc_qword(state_ptr, desc_id, desc_slot_offset())
+    node_count = vfs_state_qword(state_ptr, vfs_slot_node_count())
+    if index >= node_count:
+        return 0
+
+    name_ptr = vfs_node_qword(state_ptr, index, node_slot_name_ptr())
+    name_len = vfs_node_qword(state_ptr, index, node_slot_name_len())
+    copied = 0
+    if length > name_len:
+        length = name_len
+
+    while copied < length:
+        store_byte(dst_ptr + copied, load_byte(name_ptr + copied))
+        copied += 1
+
+    set_vfs_desc_qword(state_ptr, desc_id, desc_slot_offset(), index + 1)
+    return copied
+
+
 def vfs_read_descriptor(state_ptr: int, desc_id: int, dst_ptr: int, length: int):
     if desc_id <= 0:
         return -1
@@ -381,7 +457,9 @@ def vfs_read_descriptor(state_ptr: int, desc_id: int, dst_ptr: int, length: int)
 
     kind = vfs_desc_qword(state_ptr, desc_id, desc_slot_kind())
     if kind == desc_kind_console_in():
-        return 0
+        return console_read_ptr_len(dst_ptr, length)
+    if kind == desc_kind_directory():
+        return -1
     if kind != desc_kind_initramfs_file():
         return -1
 
@@ -407,20 +485,22 @@ def vfs_read_descriptor(state_ptr: int, desc_id: int, dst_ptr: int, length: int)
 def vfs_self_test(state_ptr: int):
     path = alloc_bytes(16)
     desc = 0
+    dir_desc = 0
     buf = 0
     count = 0
+    stat_buf = 0
 
-    store_byte(path + 0, byte(47))
-    store_byte(path + 1, byte(104))
-    store_byte(path + 2, byte(101))
-    store_byte(path + 3, byte(108))
-    store_byte(path + 4, byte(108))
-    store_byte(path + 5, byte(111))
-    store_byte(path + 6, byte(46))
-    store_byte(path + 7, byte(116))
-    store_byte(path + 8, byte(120))
-    store_byte(path + 9, byte(116))
-    store_byte(path + 10, byte(0))
+    store_byte(path + 0, 47)
+    store_byte(path + 1, 104)
+    store_byte(path + 2, 101)
+    store_byte(path + 3, 108)
+    store_byte(path + 4, 108)
+    store_byte(path + 5, 111)
+    store_byte(path + 6, 46)
+    store_byte(path + 7, 116)
+    store_byte(path + 8, 120)
+    store_byte(path + 9, 116)
+    store_byte(path + 10, 0)
     desc = vfs_open_path(state_ptr, path, 10, 0)
     if desc == 0:
         panic("vfs self-test open failed".c_str())
@@ -429,21 +509,27 @@ def vfs_self_test(state_ptr: int):
     count = vfs_read_descriptor(state_ptr, desc, buf, 64)
     if count <= 0:
         panic("vfs self-test read failed".c_str())
+    stat_buf = alloc_bytes(16)
+    if vfs_stat_descriptor(state_ptr, desc, stat_buf) != 0:
+        panic("vfs self-test stat failed".c_str())
+    dir_desc = vfs_open_cstring(state_ptr, "/".c_str())
+    if dir_desc == 0:
+        panic("vfs self-test dir open failed".c_str())
 
-    console_write_label_hex("vfs.node0.name.ptr=".c_str(), vfs_node_qword(state_ptr, 0, node_slot_name_ptr()))
-    console_write_label_hex("vfs.node0.data.ptr=".c_str(), vfs_node_qword(state_ptr, 0, node_slot_data_ptr()))
-    console_write_label_hex("vfs.node0.data.q0=".c_str(), vfs_raw_qword(vfs_node_qword(state_ptr, 0, node_slot_data_ptr())))
-    console_write_label_hex("vfs.node0.data.q1=".c_str(), vfs_raw_qword(vfs_node_qword(state_ptr, 0, node_slot_data_ptr()) + 8))
-    console_write("vfs.node0.name.sample=".c_str())
-    console_write_ptr_len(vfs_node_qword(state_ptr, 0, node_slot_name_ptr()), vfs_node_qword(state_ptr, 0, node_slot_name_len()))
-    console_write("\n".c_str())
-    console_write("vfs.node0.data.sample=".c_str())
-    console_write_ptr_len(vfs_node_qword(state_ptr, 0, node_slot_data_ptr()), vfs_node_qword(state_ptr, 0, node_slot_data_len()))
-    console_write("\n".c_str())
     console_write_label_u64("vfs.self_test.bytes=".c_str(), count)
+    console_write_label_u64("vfs.self_test.kind=".c_str(), load_qword_region(stat_buf, 2, 0))
+    console_write_label_u64("vfs.self_test.size=".c_str(), load_qword_region(stat_buf, 2, 1))
     console_write("vfs.self_test.sample=".c_str())
+    console_write_ptr_len(buf, count)
+    console_write("\n".c_str())
+    count = vfs_readdir_descriptor(state_ptr, dir_desc, buf, 64)
+    if count <= 0:
+        panic("vfs self-test readdir failed".c_str())
+    console_write("vfs.self_test.dirent=".c_str())
     console_write_ptr_len(buf, count)
     console_write("\n".c_str())
     if vfs_close_descriptor(state_ptr, desc) != 0:
         panic("vfs self-test close failed".c_str())
+    if vfs_close_descriptor(state_ptr, dir_desc) != 0:
+        panic("vfs self-test dir close failed".c_str())
     console_write_line("vfs self-test ok".c_str())

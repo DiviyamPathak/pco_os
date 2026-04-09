@@ -1,4 +1,6 @@
 from C import serial_init()
+from C import serial_rx_ready() -> int
+from C import serial_read_byte() -> int
 from C import serial_write_byte(byte)
 from C import serial_write_u64(int)
 from C import serial_write_hex(int)

@@ -17,6 +17,8 @@ from kconsole import print_msg
 from kexceptions import handle_exception
 from kexceptions import run_exception_test
 from kidt import init_idt
+from kshell import shell_run
+from kshell import shell_self_test
 from ksched import dump_scheduler_summary
 from ksched import init_scheduler
 from ksched import scheduler_enter_first_task
@@ -94,16 +96,8 @@ def worker_task_one():
     sys_write(" ticks=".c_str())
     sys_write_u64(sys_clock_ticks())
     sys_write("\n".c_str())
-
-    next_report = sys_clock_ticks() + 100
-    while True:
-        sys_yield()
-        now = sys_clock_ticks()
-        if now >= next_report:
-            sys_write("task1 heartbeat ticks=".c_str())
-            sys_write_u64(now)
-            sys_write("\n".c_str())
-            next_report = now + 100
+    shell_self_test()
+    shell_run()
 
 
 def worker_task_two():

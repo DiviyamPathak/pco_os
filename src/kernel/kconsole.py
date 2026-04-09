@@ -1,6 +1,7 @@
+from khal import serial_read_byte
+from khal import serial_rx_ready
 from khal import serial_write_byte
-from ksupport import load_byte
-from ksupport import load_byte_region
+from khal import load_byte
 
 
 def print_msg(msg: cobj, line: int, color: int):
@@ -26,6 +27,30 @@ def console_put_byte(ch: byte):
     serial_write_byte(ch)
 
 
+def console_input_ready():
+    return serial_rx_ready() != 0
+
+
+def console_read_byte():
+    return serial_read_byte()
+
+
+def console_read_ptr_len(ptr: int, length: int):
+    dst = Ptr[byte](ptr)
+    count = 0
+
+    if ptr == 0 or length <= 0:
+        return 0
+
+    while count < length and console_input_ready():
+        ch = console_read_byte()
+        if ch == 13:
+            ch = 10
+        dst[count] = byte(ch)
+        count += 1
+    return count
+
+
 def console_write(msg: cobj):
     i = 0
     while msg[i] != byte(0):
@@ -46,7 +71,7 @@ def console_write_ptr_len(ptr: int, length: int):
 
     i = 0
     while i < length:
-        console_put_byte(byte(load_byte_region(ptr, length, i)))
+        console_put_byte(byte(load_byte(ptr + i)))
         i += 1
     return i
 

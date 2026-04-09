@@ -11,6 +11,8 @@ global seq_stdin
 global seq_stdout
 global seq_terminate
 global serial_init
+global serial_rx_ready
+global serial_read_byte
 global serial_write_byte
 global serial_write_u64
 global serial_write_hex
@@ -151,6 +153,18 @@ serial_write_byte:
     mov dx, COM1
     mov al, dil
     out dx, al
+    ret
+
+serial_rx_ready:
+    mov dx, COM1 + 5
+    in al, dx
+    and eax, 1
+    ret
+
+serial_read_byte:
+    mov dx, COM1
+    in al, dx
+    movzx eax, al
     ret
 
 serial_write_u64:
