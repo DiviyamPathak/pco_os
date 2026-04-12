@@ -4,7 +4,8 @@ from kconsole import console_write
 from kconsole import console_write_label_u64
 from kconsole import console_write_line
 from kconsole import console_write_u64
-from ksched import scheduler_create_user_task
+from kelf import elf_validate_user_image
+from ksched import scheduler_create_user_elf_task
 from ksched import scheduler_current_task
 from ksched import scheduler_exit_current_task
 from ksched import scheduler_runnable_count
@@ -24,6 +25,7 @@ from kvfs import vfs_readdir_descriptor
 from kvfs import vfs_stat_descriptor
 from kvfs import vfs_write_descriptor
 from ksupport import alloc_bytes
+from ksupport import load_byte_region
 from ksupport import load_qword_region
 from ksupport import panic
 from ksupport import store_byte
@@ -76,6 +78,10 @@ def syscall_fstat_number():
 
 def syscall_readdir_number():
     return 12
+
+
+def syscall_spawn_exec_number():
+    return 13
 
 
 def active_scheduler_state():
@@ -177,6 +183,49 @@ def syscall_close_fd(state_ptr: int, task_id: int, fd: int):
     return 0
 
 
+def syscall_spawn_exec_kernel_path(state_ptr: int, task_id: int, path_ptr: int, path_len: int):
+    vfs_state = scheduler_vfs_state(state_ptr)
+    desc_id = 0
+    stat_buf = 0
+    image_len = 0
+    image_ptr = 0
+    read_count = 0
+    if path_ptr == 0 or path_len <= 0:
+        return -1
+
+    desc_id = vfs_open_path(vfs_state, path_ptr, path_len, 0)
+    if desc_id == 0:
+        return -1
+
+    stat_buf = alloc_bytes(16)
+    if vfs_stat_descriptor(vfs_state, desc_id, stat_buf) != 0:
+        vfs_close_descriptor(vfs_state, desc_id)
+        return -1
+    if load_qword_region(stat_buf, 2, 0) != 1:
+        vfs_close_descriptor(vfs_state, desc_id)
+        return -1
+
+    image_len = load_qword_region(stat_buf, 2, 1)
+    if image_len <= 0 or image_len > 16384:
+        vfs_close_descriptor(vfs_state, desc_id)
+        return -1
+
+    image_ptr = alloc_bytes(image_len)
+    read_count = vfs_read_descriptor(vfs_state, desc_id, image_ptr, image_len)
+    vfs_close_descriptor(vfs_state, desc_id)
+    if read_count != image_len:
+        return -1
+    if not elf_validate_user_image(image_ptr, image_len):
+        return -1
+    return scheduler_create_user_elf_task(state_ptr, 200 + scheduler_runnable_count(state_ptr), image_ptr, image_len)
+
+
+def syscall_spawn_exec_user_path(state_ptr: int, task_id: int, path_ptr: int, path_len: int):
+    if not syscall_validate_user_buffer(state_ptr, task_id, path_ptr, path_len):
+        return -1
+    return syscall_spawn_exec_kernel_path(state_ptr, task_id, path_ptr, path_len)
+
+
 def syscall_fstat_user_buffer(state_ptr: int, task_id: int, fd: int, ptr: int):
     if not syscall_validate_user_buffer(state_ptr, task_id, ptr, 16):
         return -1
@@ -251,7 +300,12 @@ def syscall_dispatch(number: int, a0: int, a1: int, a2: int, a3: int, a4: int, a
         return scheduler_waitpid(state_ptr, a0)
 
     if number == syscall_spawn_user_demo_number():
-        return scheduler_create_user_task(state_ptr, 100 + scheduler_runnable_count(state_ptr))
+        return -1
+
+    if number == syscall_spawn_exec_number():
+        if scheduler_task_mode(state_ptr, current_task) == task_mode_user():
+            return syscall_spawn_exec_user_path(state_ptr, current_task, a0, a1)
+        return syscall_spawn_exec_kernel_path(state_ptr, current_task, a0, a1)
 
     if number == syscall_close_number():
         return syscall_close_fd(state_ptr, current_task, a0)
@@ -313,6 +367,29 @@ def sys_fstat(fd: int, ptr: int):
 
 def sys_readdir(fd: int, ptr: int, length: int):
     return invoke_syscall(syscall_readdir_number(), fd, ptr, length, 0, 0)
+
+
+def sys_spawn_exec_ptr(path_ptr: int, path_len: int):
+    return invoke_syscall(syscall_spawn_exec_number(), path_ptr, path_len, 0, 0, 0)
+
+
+def sys_cstring_len(msg: cobj):
+    i = 0
+    while msg[i] != byte(0):
+        i += 1
+    return i
+
+
+def sys_spawn_exec_cstring(path: cobj):
+    length = sys_cstring_len(path)
+    buf = alloc_bytes(length + 1)
+    dst = Ptr[byte](buf)
+    i = 0
+    while i < length:
+        dst[i] = path[i]
+        i += 1
+    dst[length] = byte(0)
+    return sys_spawn_exec_ptr(buf, length)
 
 
 @export

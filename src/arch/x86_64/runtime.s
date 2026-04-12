@@ -23,6 +23,7 @@ global restore_task_context_asm
 global get_task_trampoline_addr_asm
 global get_user_task_trampoline_addr_asm
 global get_user_demo_entry_addr_asm
+global get_user_hello_entry_addr_asm
 global enter_user_mode_asm
 global invoke_syscall_asm
 
@@ -32,7 +33,7 @@ extern task_returned
 section .bss
 align 16
 heap_space:
-    resb 65536
+    resb 262144
 heap_end:
 heap_ptr:
     resq 1
@@ -273,6 +274,10 @@ get_user_demo_entry_addr_asm:
     mov rax, user_demo_entry_asm
     ret
 
+get_user_hello_entry_addr_asm:
+    mov rax, user_hello_entry_asm
+    ret
+
 enter_user_mode_asm:
     mov ax, 0x23
     mov ds, ax
@@ -356,5 +361,23 @@ user_demo_entry_asm:
     int 0x80
 .spin:
     jmp .spin
+
+align 4096
+user_hello_entry_asm:
+    mov edi, 1
+    lea rsi, [rel user_hello_message]
+    mov edx, user_hello_message_end - user_hello_message
+    mov eax, 1
+    int 0x80
+
+    mov edi, 7
+    mov eax, 5
+    int 0x80
+.spin_hello:
+    jmp .spin_hello
+
+user_hello_message:
+    db "Hello from user program!", 10
+user_hello_message_end:
 
 section .note.GNU-stack noalloc noexec nowrite progbits

@@ -18,6 +18,7 @@ BOOT_DIR = src/boot
 UEFI_SRC_DIR = $(BOOT_DIR)/uefi
 GRUB_SRC_DIR = $(BOOT_DIR)/grub
 KERNEL_DIR = src/kernel
+USER_DIR = src/user
 INITRAMFS_DIR = initramfs
 BUILD_DIR = build
 PROJECT_NAME ?= $(notdir $(CURDIR))
@@ -28,6 +29,7 @@ RUNTIME_SRC = $(ARCH_DIR)/runtime.s
 INTERRUPTS_SRC = $(ARCH_DIR)/interrupts.s
 KERNEL_SRC = $(KERNEL_DIR)/kernel.py
 KERNEL_PY_SRCS = $(wildcard $(KERNEL_DIR)/*.py)
+USER_SRCS = $(wildcard $(USER_DIR)/*.s) $(USER_DIR)/linker.ld
 INITRAMFS_SRCS = $(shell find $(INITRAMFS_DIR) -type f 2>/dev/null | sort)
 EFI_LOADER_SRC = $(UEFI_SRC_DIR)/efi_loader.c
 EFI_ENTRY_SRC = $(UEFI_SRC_DIR)/efi_entry.S
@@ -77,6 +79,13 @@ ISO_IMAGE = $(BUILD_DIR)/$(ISO_NAME).iso
 EFI_APP = $(BUILD_DIR)/BOOTX64.EFI
 UEFI_DISK = $(BUILD_DIR)/$(UEFI_DISK_NAME).img
 INITRAMFS_IMAGE = $(BUILD_DIR)/initramfs.bin
+USER_BUILD_DIR = $(BUILD_DIR)/user
+USER_DEMO_OBJ = $(USER_BUILD_DIR)/demo.o
+USER_HELLO_OBJ = $(USER_BUILD_DIR)/hello.o
+USER_DEMO_ELF = $(USER_BUILD_DIR)/demo.elf
+USER_HELLO_ELF = $(USER_BUILD_DIR)/hello.elf
+INITRAMFS_STAGE_DIR = $(BUILD_DIR)/initramfs-root
+INITRAMFS_STAGE_STAMP = $(BUILD_DIR)/initramfs-root.stamp
 
 $(KERNEL_ELF): $(OBJS) $(LDSCRIPT)
 	$(LD) $(LDFLAGS) -T $(LDSCRIPT) -o $@ $(OBJS)
@@ -107,8 +116,31 @@ $(EFI_APP): $(EFI_ENTRY_OBJ) $(EFI_LOADER_OBJ)
 	$(LD) $(EFI_LDFLAGS) -o $@ $(EFI_ENTRY_OBJ) $(EFI_LOADER_OBJ)
 	$(OBJCOPY) --remove-section .comment --remove-section .eh_frame --remove-section .note.gnu.property $@
 
-$(INITRAMFS_IMAGE): scripts/build-initramfs.py $(INITRAMFS_SRCS)
-	$(PYTHON) scripts/build-initramfs.py $(INITRAMFS_DIR) $@
+$(USER_DEMO_OBJ): $(USER_DIR)/demo.s
+	@mkdir -p $(USER_BUILD_DIR)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(USER_HELLO_OBJ): $(USER_DIR)/hello.s
+	@mkdir -p $(USER_BUILD_DIR)
+	$(AS) $(ASFLAGS) $< -o $@
+
+$(USER_DEMO_ELF): $(USER_DEMO_OBJ) $(USER_DIR)/linker.ld
+	$(LD) -m elf_x86_64 -nostdlib -T $(USER_DIR)/linker.ld -o $@ $(USER_DEMO_OBJ)
+
+$(USER_HELLO_ELF): $(USER_HELLO_OBJ) $(USER_DIR)/linker.ld
+	$(LD) -m elf_x86_64 -nostdlib -T $(USER_DIR)/linker.ld -o $@ $(USER_HELLO_OBJ)
+
+$(INITRAMFS_STAGE_STAMP): $(INITRAMFS_SRCS) $(USER_SRCS) $(USER_DEMO_ELF) $(USER_HELLO_ELF)
+	@rm -rf $(INITRAMFS_STAGE_DIR)
+	@mkdir -p $(INITRAMFS_STAGE_DIR)
+	cp -R $(INITRAMFS_DIR)/. $(INITRAMFS_STAGE_DIR)
+	@mkdir -p $(INITRAMFS_STAGE_DIR)/bin
+	cp -f $(USER_DEMO_ELF) $(INITRAMFS_STAGE_DIR)/bin/demo
+	cp -f $(USER_HELLO_ELF) $(INITRAMFS_STAGE_DIR)/bin/hello
+	@touch $@
+
+$(INITRAMFS_IMAGE): scripts/build-initramfs.py $(INITRAMFS_STAGE_STAMP)
+	$(PYTHON) scripts/build-initramfs.py $(INITRAMFS_STAGE_DIR) $@
 
 $(UEFI_DISK): $(EFI_APP) $(KERNEL_ELF) $(INITRAMFS_IMAGE)
 	@rm -f $@

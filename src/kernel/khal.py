@@ -11,6 +11,7 @@ from C import restore_task_context_asm(int)
 from C import get_task_trampoline_addr_asm() -> int
 from C import get_user_task_trampoline_addr_asm() -> int
 from C import get_user_demo_entry_addr_asm() -> int
+from C import get_user_hello_entry_addr_asm() -> int
 from C import enter_user_mode_asm(int, int)
 from C import invoke_syscall_asm(int, int, int, int, int, int) -> int
 from C import seq_alloc_atomic(int) -> int
@@ -130,6 +131,10 @@ def user_task_trampoline_addr():
 
 def user_demo_entry_addr():
     return get_user_demo_entry_addr_asm()
+
+
+def user_hello_entry_addr():
+    return get_user_hello_entry_addr_asm()
 
 
 def enter_user_mode(user_rip: int, user_rsp: int):

@@ -26,7 +26,7 @@ from ksched import scheduler_self_test
 from ksyscall import sys_clock_ticks
 from ksyscall import sys_exit
 from ksyscall import sys_getpid
-from ksyscall import sys_spawn_user_demo
+from ksyscall import sys_spawn_exec_ptr
 from ksyscall import sys_waitpid
 from ksyscall import sys_write
 from ksyscall import sys_write_u64
@@ -41,7 +41,9 @@ from kmemory import init_pmm
 from kmemory import init_vmm
 from kmemory import pmm_self_test
 from kmemory import vmm_self_test
+from ksupport import alloc_bytes
 from ksupport import panic
+from ksupport import store_byte
 from kvfs import dump_vfs_summary
 from kvfs import init_vfs
 from kvfs import vfs_self_test
@@ -61,15 +63,41 @@ def idle_task_main():
 def worker_task_one():
     first_child = 0
     second_child = 0
+    demo_path = alloc_bytes(16)
+    hello_path = alloc_bytes(16)
+
+    store_byte(demo_path + 0, 47)
+    store_byte(demo_path + 1, 98)
+    store_byte(demo_path + 2, 105)
+    store_byte(demo_path + 3, 110)
+    store_byte(demo_path + 4, 47)
+    store_byte(demo_path + 5, 100)
+    store_byte(demo_path + 6, 101)
+    store_byte(demo_path + 7, 109)
+    store_byte(demo_path + 8, 111)
+    store_byte(demo_path + 9, 0)
+    store_byte(hello_path + 0, 47)
+    store_byte(hello_path + 1, 98)
+    store_byte(hello_path + 2, 105)
+    store_byte(hello_path + 3, 110)
+    store_byte(hello_path + 4, 47)
+    store_byte(hello_path + 5, 104)
+    store_byte(hello_path + 6, 101)
+    store_byte(hello_path + 7, 108)
+    store_byte(hello_path + 8, 108)
+    store_byte(hello_path + 9, 111)
+    store_byte(hello_path + 10, 0)
 
     sys_write("task1 start pid=".c_str())
     sys_write_u64(sys_getpid())
     sys_write("\n".c_str())
 
-    first_child = sys_spawn_user_demo()
+    first_child = sys_spawn_exec_ptr(demo_path, 9)
     sys_write("task1 spawned pid=".c_str())
     sys_write_u64(first_child)
     sys_write("\n".c_str())
+    if first_child < 0:
+        panic("exec demo spawn failed".c_str())
 
     status = sys_waitpid(first_child)
     sys_write("task1 waitpid=".c_str())
@@ -80,10 +108,12 @@ def worker_task_one():
     sys_write_u64(sys_clock_ticks())
     sys_write("\n".c_str())
 
-    second_child = sys_spawn_user_demo()
+    second_child = sys_spawn_exec_ptr(hello_path, 10)
     sys_write("task1 respawned pid=".c_str())
     sys_write_u64(second_child)
     sys_write("\n".c_str())
+    if second_child < 0:
+        panic("exec hello spawn failed".c_str())
 
     if second_child != first_child:
         panic("scheduler slot reuse failed".c_str())

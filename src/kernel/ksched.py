@@ -2,15 +2,18 @@ from kconsole import console_write
 from kconsole import console_write_label_u64
 from kconsole import console_write_line
 from kconsole import console_write_u64
+from kelf import elf_user_entry_offset
+from kelf import elf_user_segment_filesz
+from kelf import elf_user_segment_flags
+from kelf import elf_user_segment_offset
+from kelf import elf_validate_user_image
 from khal import context_switch
 from khal import load_cr3
 from khal import restore_task_context
 from khal import set_active_scheduler
 from khal import set_tss_rsp0
 from khal import task_trampoline_addr
-from khal import user_demo_entry_addr
 from khal import user_task_trampoline_addr
-from kmemory import copy_page
 from kmemory import pmm_alloc_page
 from kmemory import pmm_free_page
 from kmemory import vmm_clone_kernel_address_space
@@ -24,8 +27,10 @@ from kvfs import vfs_alloc_console_out_descriptor
 from kvfs import vfs_close_descriptor
 from ksupport import align_down
 from ksupport import alloc_bytes
+from ksupport import load_byte_region
 from ksupport import load_qword_region
 from ksupport import panic
+from ksupport import store_byte_region
 from ksupport import store_qword_region
 from ktime import current_kernel_ticks
 from ktime import wait_for_tick_edge
@@ -557,14 +562,25 @@ def scheduler_prepare_user_task_context(task_id: int, user_rip: int, user_rsp: i
     return ctx_ptr, stack_base
 
 
-def scheduler_write_cstring(dst_ptr: int, offset: int, msg: cobj):
-    dst = Ptr[byte](dst_ptr + offset)
+def elf_flag_write():
+    return 2
+
+
+def scheduler_copy_user_segment(image_ptr: int, image_len: int, code_phys: int):
+    seg_offset = elf_user_segment_offset(image_ptr, image_len)
+    seg_filesz = elf_user_segment_filesz(image_ptr, image_len)
     i = 0
-    while True:
-        dst[i] = msg[i]
-        if msg[i] == byte(0):
-            return
+
+    zero_page(code_phys)
+    while i < seg_filesz:
+        store_byte_region(code_phys, 4096, i, load_byte_region(image_ptr, image_len, seg_offset + i))
         i += 1
+
+
+def scheduler_user_code_flags(image_ptr: int, image_len: int):
+    if (elf_user_segment_flags(image_ptr, image_len) & elf_flag_write()) != 0:
+        return 0x007
+    return 0x005
 
 
 def scheduler_enqueue_task(state_ptr: int, task_id: int):
@@ -652,31 +668,40 @@ def scheduler_release_task_slot(state_ptr: int, task_id: int):
 
 
 def scheduler_create_user_task(state_ptr: int, name_tag: int):
+    panic("scheduler_create_user_task is obsolete; use ELF exec path".c_str())
+
+
+def scheduler_create_user_elf_task(state_ptr: int, name_tag: int, image_ptr: int, image_len: int):
     task_id = scheduler_find_free_task_id(state_ptr)
     pmm_state = scheduler_pmm_state(state_ptr)
     vmm_state = scheduler_vmm_state(state_ptr)
     user_cr3 = vmm_clone_kernel_address_space(vmm_state, pmm_state)
-    code_src_phys = align_down(user_demo_entry_addr(), 4096)
     code_phys = pmm_alloc_page(pmm_state)
     data_phys = pmm_alloc_page(pmm_state)
     stack_phys = pmm_alloc_page(pmm_state)
     user_base = user_task_region_base(task_id)
     user_limit = user_base + 0x3000
+    user_rip = 0
+    code_flags = 0
 
     if code_phys == 0 or data_phys == 0 or stack_phys == 0:
         panic("scheduler user task alloc failed".c_str())
+    if not elf_validate_user_image(image_ptr, image_len):
+        panic("scheduler invalid user elf".c_str())
 
-    copy_page(code_src_phys, code_phys)
+    scheduler_copy_user_segment(image_ptr, image_len, code_phys)
     zero_page(data_phys)
-    scheduler_write_cstring(data_phys, 0, "/hello.txt".c_str())
+    zero_page(stack_phys)
+    code_flags = scheduler_user_code_flags(image_ptr, image_len)
+    user_rip = user_task_code_virt(task_id) + elf_user_entry_offset(image_ptr, image_len)
     vmm_unmap_page_root(vmm_state, user_cr3, pmm_state, user_task_code_virt(task_id))
     vmm_unmap_page_root(vmm_state, user_cr3, pmm_state, user_task_stack_virt(task_id))
     vmm_unmap_page_root(vmm_state, user_cr3, pmm_state, user_task_data_virt(task_id))
-    vmm_map_page_root(vmm_state, user_cr3, pmm_state, user_task_code_virt(task_id), code_phys, 0x005)
+    vmm_map_page_root(vmm_state, user_cr3, pmm_state, user_task_code_virt(task_id), code_phys, code_flags)
     vmm_map_page_root(vmm_state, user_cr3, pmm_state, user_task_stack_virt(task_id), stack_phys, 0x007)
-    vmm_map_page_root(vmm_state, user_cr3, pmm_state, user_task_data_virt(task_id), data_phys, 0x005)
+    vmm_map_page_root(vmm_state, user_cr3, pmm_state, user_task_data_virt(task_id), data_phys, 0x007)
 
-    ctx_ptr, stack_base = scheduler_prepare_user_task_context(task_id, user_task_code_virt(task_id), user_task_stack_top(task_id))
+    ctx_ptr, stack_base = scheduler_prepare_user_task_context(task_id, user_rip, user_task_stack_top(task_id))
     scheduler_set_task(state_ptr, task_id, task_state_runnable(), name_tag, ctx_ptr, stack_base, task_mode_user(), user_cr3, user_base, user_limit, code_phys, data_phys, stack_phys)
     if task_id >= scheduler_task_count(state_ptr):
         set_scheduler_state_qword(state_ptr, sched_slot_task_count(), task_id + 1)

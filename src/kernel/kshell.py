@@ -8,7 +8,7 @@ from ksyscall import sys_fstat
 from ksyscall import sys_open_ptr
 from ksyscall import sys_read
 from ksyscall import sys_readdir
-from ksyscall import sys_spawn_user_demo
+from ksyscall import sys_spawn_exec_ptr
 from ksyscall import sys_waitpid
 from ksyscall import sys_write
 from ksyscall import sys_write_fd_ptr
@@ -77,11 +77,14 @@ def shell_print_open_failed():
 
 def shell_print_help():
     sys_write("help              show commands\n".c_str())
+    sys_write("pwd               print current path\n".c_str())
+    sys_write("clear             clear the console\n".c_str())
     sys_write("ls                list root directory\n".c_str())
     sys_write("cat <path>        print a file\n".c_str())
     sys_write("stat <path>       print file metadata\n".c_str())
     sys_write("ticks             print kernel tick count\n".c_str())
-    sys_write("spawn             run demo user task\n".c_str())
+    sys_write("spawn             run /bin/demo\n".c_str())
+    sys_write("run <path>        exec a user program\n".c_str())
 
 
 def shell_run_ls(root_path_ptr: int, io_buf: int):
@@ -137,8 +140,20 @@ def shell_run_stat(path_ptr: int, path_len: int, stat_buf: int):
 
 
 def shell_run_spawn():
-    pid = sys_spawn_user_demo()
+    path = alloc_bytes(16)
+    pid = 0
     status = 0
+    store_byte(path + 0, 47)
+    store_byte(path + 1, 98)
+    store_byte(path + 2, 105)
+    store_byte(path + 3, 110)
+    store_byte(path + 4, 47)
+    store_byte(path + 5, 100)
+    store_byte(path + 6, 101)
+    store_byte(path + 7, 109)
+    store_byte(path + 8, 111)
+    store_byte(path + 9, 0)
+    pid = sys_spawn_exec_ptr(path, 9)
     sys_write("spawn pid=".c_str())
     sys_write_u64(pid)
     sys_write("\n".c_str())
@@ -150,11 +165,34 @@ def shell_run_spawn():
     sys_write("\n".c_str())
 
 
+def shell_run_exec(path_ptr: int, path_len: int):
+    pid = 0
+    status = 0
+
+    pid = sys_spawn_exec_ptr(path_ptr, path_len)
+
+    sys_write("run pid=".c_str())
+    sys_write_u64(pid)
+    sys_write("\n".c_str())
+    if pid < 0:
+        return
+    status = sys_waitpid(pid)
+    sys_write("run status=".c_str())
+    sys_write_u64(status)
+    sys_write("\n".c_str())
+
+
 def shell_execute_line(line_ptr: int, line_len: int, root_path_ptr: int, io_buf: int, stat_buf: int):
     if line_len <= 0:
         return
     if shell_buffer_equals(line_ptr, line_len, "help".c_str()):
         shell_print_help()
+        return
+    if shell_buffer_equals(line_ptr, line_len, "pwd".c_str()):
+        sys_write("/\n".c_str())
+        return
+    if shell_buffer_equals(line_ptr, line_len, "clear".c_str()):
+        sys_write("\x1b[2J\x1b[H".c_str())
         return
     if shell_buffer_equals(line_ptr, line_len, "ls".c_str()):
         shell_run_ls(root_path_ptr, io_buf)
@@ -167,10 +205,13 @@ def shell_execute_line(line_ptr: int, line_len: int, root_path_ptr: int, io_buf:
     if shell_buffer_equals(line_ptr, line_len, "spawn".c_str()):
         shell_run_spawn()
         return
-    if shell_buffer_startswith(line_ptr, line_len, "cat ".c_str()) and line_len > 4:
+    if line_len > 4 and shell_buffer_startswith(line_ptr, line_len, "run".c_str()) and load_byte(line_ptr + 3) == 32:
+        shell_run_exec(line_ptr + 4, line_len - 4)
+        return
+    if line_len > 4 and shell_buffer_startswith(line_ptr, line_len, "cat".c_str()) and load_byte(line_ptr + 3) == 32:
         shell_run_cat(line_ptr + 4, line_len - 4, io_buf)
         return
-    if shell_buffer_startswith(line_ptr, line_len, "stat ".c_str()) and line_len > 5:
+    if line_len > 5 and shell_buffer_startswith(line_ptr, line_len, "stat".c_str()) and load_byte(line_ptr + 4) == 32:
         shell_run_stat(line_ptr + 5, line_len - 5, stat_buf)
         return
     sys_write("unknown command\n".c_str())
@@ -182,6 +223,7 @@ def shell_self_test():
     stat_buf = alloc_bytes(16)
     root_path = alloc_bytes(4)
     hello_path = alloc_bytes(16)
+    hello_exec_path = alloc_bytes(16)
 
     store_byte(root_path + 0, 47)
     store_byte(root_path + 1, 0)
@@ -196,14 +238,29 @@ def shell_self_test():
     store_byte(hello_path + 8, 120)
     store_byte(hello_path + 9, 116)
     store_byte(hello_path + 10, 0)
+    store_byte(hello_exec_path + 0, 47)
+    store_byte(hello_exec_path + 1, 98)
+    store_byte(hello_exec_path + 2, 105)
+    store_byte(hello_exec_path + 3, 110)
+    store_byte(hello_exec_path + 4, 47)
+    store_byte(hello_exec_path + 5, 104)
+    store_byte(hello_exec_path + 6, 101)
+    store_byte(hello_exec_path + 7, 108)
+    store_byte(hello_exec_path + 8, 108)
+    store_byte(hello_exec_path + 9, 111)
+    store_byte(hello_exec_path + 10, 0)
 
     sys_write("shell self-test begin\n".c_str())
     shell_copy_cstring(line_buf, "help".c_str())
     shell_execute_line(line_buf, 4, root_path, io_buf, stat_buf)
     shell_copy_cstring(line_buf, "ls".c_str())
     shell_execute_line(line_buf, 2, root_path, io_buf, stat_buf)
+    shell_copy_cstring(line_buf, "pwd".c_str())
+    shell_execute_line(line_buf, 3, root_path, io_buf, stat_buf)
     shell_run_stat(hello_path, 10, stat_buf)
     shell_run_cat(hello_path, 10, io_buf)
+    shell_run_spawn()
+    shell_run_exec(hello_exec_path, 10)
     shell_copy_cstring(line_buf, "ticks".c_str())
     shell_execute_line(line_buf, 5, root_path, io_buf, stat_buf)
     sys_write("shell self-test ok\n".c_str())
