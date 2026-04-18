@@ -7,11 +7,13 @@ from kconsole import console_write_u64
 from kelf import elf_validate_user_image
 from ksched import scheduler_create_user_elf_task
 from ksched import scheduler_current_task
+from ksched import scheduler_exec_current_task
 from ksched import scheduler_exit_current_task
 from ksched import scheduler_runnable_count
 from ksched import scheduler_set_task_fd_object
 from ksched import scheduler_task_fd_object
 from ksched import scheduler_task_mode
+from ksched import scheduler_task_parent_pid
 from ksched import scheduler_task_user_base
 from ksched import scheduler_task_user_limit
 from ksched import scheduler_vfs_state
@@ -29,6 +31,7 @@ from ksupport import load_byte_region
 from ksupport import load_qword_region
 from ksupport import panic
 from ksupport import store_byte
+from ksupport import store_qword_region
 from ktime import current_kernel_ticks
 
 
@@ -84,6 +87,26 @@ def syscall_spawn_exec_number():
     return 13
 
 
+def syscall_exec_number():
+    return 14
+
+
+def syscall_getppid_number():
+    return 15
+
+
+def syscall_exec_max_args():
+    return 8
+
+
+def syscall_exec_max_env():
+    return 8
+
+
+def syscall_exec_max_string():
+    return 64
+
+
 def active_scheduler_state():
     state_ptr = get_active_scheduler()
     if state_ptr == 0:
@@ -105,6 +128,100 @@ def syscall_validate_user_buffer(state_ptr: int, task_id: int, ptr: int, length:
     if ptr + length < ptr or ptr + length > limit:
         return False
     return True
+
+
+def exec_vec_entry_ptr(vec_ptr: int, index: int):
+    return vec_ptr + index * 16
+
+
+def set_exec_vec_entry(vec_ptr: int, index: int, str_ptr: int, str_len: int):
+    store_qword_region(exec_vec_entry_ptr(vec_ptr, index), 2, 0, str_ptr)
+    store_qword_region(exec_vec_entry_ptr(vec_ptr, index), 2, 1, str_len)
+
+
+def syscall_copy_kernel_cstring(ptr: int):
+    length = 0
+    dst = 0
+    while length < syscall_exec_max_string():
+        if load_byte_region(ptr, syscall_exec_max_string() + 1, length) == 0:
+            dst = alloc_bytes(length + 1)
+            copied = 0
+            while copied < length:
+                store_byte(dst + copied, load_byte_region(ptr, syscall_exec_max_string() + 1, copied))
+                copied += 1
+            store_byte(dst + length, 0)
+            return dst, length
+        length += 1
+    return 0, 0
+
+
+def syscall_copy_user_cstring(state_ptr: int, task_id: int, ptr: int):
+    length = 0
+    dst = 0
+    if ptr == 0:
+        return 0, 0
+    while length < syscall_exec_max_string():
+        if not syscall_validate_user_buffer(state_ptr, task_id, ptr, length + 1):
+            return 0, 0
+        if load_byte_region(ptr, length + 1, length) == 0:
+            dst = alloc_bytes(length + 1)
+            copied = 0
+            while copied < length:
+                store_byte(dst + copied, load_byte_region(ptr, length + 1, copied))
+                copied += 1
+            store_byte(dst + length, 0)
+            return dst, length
+        length += 1
+    return 0, 0
+
+
+def syscall_copy_kernel_exec_vector(array_ptr: int, max_count: int):
+    count = 0
+    str_ptr = 0
+    str_len = 0
+    vec_ptr = 0
+    if array_ptr == 0:
+        return 0, 0
+    vec_ptr = alloc_bytes(max_count * 16)
+    while count < max_count:
+        entry_ptr = load_qword_region(array_ptr, max_count + 1, count)
+        if entry_ptr == 0:
+            return vec_ptr, count
+        str_ptr, str_len = syscall_copy_kernel_cstring(entry_ptr)
+        if str_ptr == 0:
+            return 0, 0
+        set_exec_vec_entry(vec_ptr, count, str_ptr, str_len)
+        count += 1
+    if load_qword_region(array_ptr, max_count + 1, max_count) != 0:
+        return 0, 0
+    return vec_ptr, count
+
+
+def syscall_copy_user_exec_vector(state_ptr: int, task_id: int, array_ptr: int, max_count: int):
+    count = 0
+    entry_ptr = 0
+    str_ptr = 0
+    str_len = 0
+    vec_ptr = 0
+    if array_ptr == 0:
+        return 0, 0
+    if (array_ptr & 0x7) != 0:
+        return 0, 0
+    if not syscall_validate_user_buffer(state_ptr, task_id, array_ptr, (max_count + 1) * 8):
+        return 0, 0
+    vec_ptr = alloc_bytes(max_count * 16)
+    while count < max_count:
+        entry_ptr = load_qword_region(array_ptr, max_count + 1, count)
+        if entry_ptr == 0:
+            return vec_ptr, count
+        str_ptr, str_len = syscall_copy_user_cstring(state_ptr, task_id, entry_ptr)
+        if str_ptr == 0:
+            return 0, 0
+        set_exec_vec_entry(vec_ptr, count, str_ptr, str_len)
+        count += 1
+    if load_qword_region(array_ptr, max_count + 1, max_count) != 0:
+        return 0, 0
+    return vec_ptr, count
 
 
 def syscall_write_user_buffer(state_ptr: int, task_id: int, fd: int, ptr: int, length: int):
@@ -183,47 +300,120 @@ def syscall_close_fd(state_ptr: int, task_id: int, fd: int):
     return 0
 
 
-def syscall_spawn_exec_kernel_path(state_ptr: int, task_id: int, path_ptr: int, path_len: int):
-    vfs_state = scheduler_vfs_state(state_ptr)
+def syscall_load_exec_image(vfs_state: int, path_ptr: int, path_len: int):
     desc_id = 0
     stat_buf = 0
     image_len = 0
     image_ptr = 0
     read_count = 0
     if path_ptr == 0 or path_len <= 0:
-        return -1
+        return 0, 0
 
     desc_id = vfs_open_path(vfs_state, path_ptr, path_len, 0)
     if desc_id == 0:
-        return -1
+        return 0, 0
 
     stat_buf = alloc_bytes(16)
     if vfs_stat_descriptor(vfs_state, desc_id, stat_buf) != 0:
         vfs_close_descriptor(vfs_state, desc_id)
-        return -1
+        return 0, 0
     if load_qword_region(stat_buf, 2, 0) != 1:
         vfs_close_descriptor(vfs_state, desc_id)
-        return -1
+        return 0, 0
 
     image_len = load_qword_region(stat_buf, 2, 1)
     if image_len <= 0 or image_len > 16384:
         vfs_close_descriptor(vfs_state, desc_id)
-        return -1
+        return 0, 0
 
     image_ptr = alloc_bytes(image_len)
     read_count = vfs_read_descriptor(vfs_state, desc_id, image_ptr, image_len)
     vfs_close_descriptor(vfs_state, desc_id)
     if read_count != image_len:
-        return -1
+        return 0, 0
     if not elf_validate_user_image(image_ptr, image_len):
+        return 0, 0
+    return image_ptr, image_len
+
+
+def syscall_spawn_exec_kernel_path(state_ptr: int, task_id: int, path_ptr: int, path_len: int, argv_ptr: int, envp_ptr: int):
+    image_ptr = 0
+    image_len = 0
+    argvec_ptr = 0
+    arg_count = 0
+    envvec_ptr = 0
+    env_count = 0
+    image_ptr, image_len = syscall_load_exec_image(scheduler_vfs_state(state_ptr), path_ptr, path_len)
+    if image_ptr == 0:
         return -1
-    return scheduler_create_user_elf_task(state_ptr, 200 + scheduler_runnable_count(state_ptr), image_ptr, image_len)
+    argvec_ptr, arg_count = syscall_copy_kernel_exec_vector(argv_ptr, syscall_exec_max_args())
+    if argv_ptr != 0 and argvec_ptr == 0:
+        return -1
+    envvec_ptr, env_count = syscall_copy_kernel_exec_vector(envp_ptr, syscall_exec_max_env())
+    if envp_ptr != 0 and envvec_ptr == 0:
+        return -1
+    return scheduler_create_user_elf_task(state_ptr, 200 + scheduler_runnable_count(state_ptr), image_ptr, image_len, argvec_ptr, arg_count, envvec_ptr, env_count)
 
 
-def syscall_spawn_exec_user_path(state_ptr: int, task_id: int, path_ptr: int, path_len: int):
+def syscall_spawn_exec_user_path(state_ptr: int, task_id: int, path_ptr: int, path_len: int, argv_ptr: int, envp_ptr: int):
+    image_ptr = 0
+    image_len = 0
+    argvec_ptr = 0
+    arg_count = 0
+    envvec_ptr = 0
+    env_count = 0
     if not syscall_validate_user_buffer(state_ptr, task_id, path_ptr, path_len):
         return -1
-    return syscall_spawn_exec_kernel_path(state_ptr, task_id, path_ptr, path_len)
+    argvec_ptr, arg_count = syscall_copy_user_exec_vector(state_ptr, task_id, argv_ptr, syscall_exec_max_args())
+    if argv_ptr != 0 and argvec_ptr == 0:
+        return -1
+    envvec_ptr, env_count = syscall_copy_user_exec_vector(state_ptr, task_id, envp_ptr, syscall_exec_max_env())
+    if envp_ptr != 0 and envvec_ptr == 0:
+        return -1
+    image_ptr, image_len = syscall_load_exec_image(scheduler_vfs_state(state_ptr), path_ptr, path_len)
+    if image_ptr == 0:
+        return -1
+    return scheduler_create_user_elf_task(state_ptr, 200 + scheduler_runnable_count(state_ptr), image_ptr, image_len, argvec_ptr, arg_count, envvec_ptr, env_count)
+
+
+def syscall_exec_kernel_path(state_ptr: int, task_id: int, path_ptr: int, path_len: int, argv_ptr: int, envp_ptr: int):
+    image_ptr = 0
+    image_len = 0
+    argvec_ptr = 0
+    arg_count = 0
+    envvec_ptr = 0
+    env_count = 0
+    image_ptr, image_len = syscall_load_exec_image(scheduler_vfs_state(state_ptr), path_ptr, path_len)
+    if image_ptr == 0:
+        return -1
+    argvec_ptr, arg_count = syscall_copy_kernel_exec_vector(argv_ptr, syscall_exec_max_args())
+    if argv_ptr != 0 and argvec_ptr == 0:
+        return -1
+    envvec_ptr, env_count = syscall_copy_kernel_exec_vector(envp_ptr, syscall_exec_max_env())
+    if envp_ptr != 0 and envvec_ptr == 0:
+        return -1
+    return scheduler_exec_current_task(state_ptr, image_ptr, image_len, argvec_ptr, arg_count, envvec_ptr, env_count)
+
+
+def syscall_exec_user_path(state_ptr: int, task_id: int, path_ptr: int, path_len: int, argv_ptr: int, envp_ptr: int):
+    argvec_ptr = 0
+    arg_count = 0
+    envvec_ptr = 0
+    env_count = 0
+    image_ptr = 0
+    image_len = 0
+    if not syscall_validate_user_buffer(state_ptr, task_id, path_ptr, path_len):
+        return -1
+    argvec_ptr, arg_count = syscall_copy_user_exec_vector(state_ptr, task_id, argv_ptr, syscall_exec_max_args())
+    if argv_ptr != 0 and argvec_ptr == 0:
+        return -1
+    envvec_ptr, env_count = syscall_copy_user_exec_vector(state_ptr, task_id, envp_ptr, syscall_exec_max_env())
+    if envp_ptr != 0 and envvec_ptr == 0:
+        return -1
+    image_ptr, image_len = syscall_load_exec_image(scheduler_vfs_state(state_ptr), path_ptr, path_len)
+    if image_ptr == 0:
+        return -1
+    return scheduler_exec_current_task(state_ptr, image_ptr, image_len, argvec_ptr, arg_count, envvec_ptr, env_count)
 
 
 def syscall_fstat_user_buffer(state_ptr: int, task_id: int, fd: int, ptr: int):
@@ -284,6 +474,9 @@ def syscall_dispatch(number: int, a0: int, a1: int, a2: int, a3: int, a4: int, a
     if number == syscall_getpid_number():
         return current_task
 
+    if number == syscall_getppid_number():
+        return scheduler_task_parent_pid(state_ptr, current_task)
+
     if number == syscall_clock_ticks_number():
         return current_kernel_ticks()
 
@@ -304,8 +497,13 @@ def syscall_dispatch(number: int, a0: int, a1: int, a2: int, a3: int, a4: int, a
 
     if number == syscall_spawn_exec_number():
         if scheduler_task_mode(state_ptr, current_task) == task_mode_user():
-            return syscall_spawn_exec_user_path(state_ptr, current_task, a0, a1)
-        return syscall_spawn_exec_kernel_path(state_ptr, current_task, a0, a1)
+            return syscall_spawn_exec_user_path(state_ptr, current_task, a0, a1, a2, a3)
+        return syscall_spawn_exec_kernel_path(state_ptr, current_task, a0, a1, a2, a3)
+
+    if number == syscall_exec_number():
+        if scheduler_task_mode(state_ptr, current_task) == task_mode_user():
+            return syscall_exec_user_path(state_ptr, current_task, a0, a1, a2, a3)
+        return syscall_exec_kernel_path(state_ptr, current_task, a0, a1, a2, a3)
 
     if number == syscall_close_number():
         return syscall_close_fd(state_ptr, current_task, a0)
@@ -327,6 +525,10 @@ def sys_write_fd_ptr(fd: int, ptr: int, length: int):
 
 def sys_getpid():
     return invoke_syscall(syscall_getpid_number(), 0, 0, 0, 0, 0)
+
+
+def sys_getppid():
+    return invoke_syscall(syscall_getppid_number(), 0, 0, 0, 0, 0)
 
 
 def sys_clock_ticks():
@@ -371,6 +573,30 @@ def sys_readdir(fd: int, ptr: int, length: int):
 
 def sys_spawn_exec_ptr(path_ptr: int, path_len: int):
     return invoke_syscall(syscall_spawn_exec_number(), path_ptr, path_len, 0, 0, 0)
+
+
+def sys_spawn_execve_ptr(path_ptr: int, path_len: int, argv_ptr: int, envp_ptr: int):
+    return invoke_syscall(syscall_spawn_exec_number(), path_ptr, path_len, argv_ptr, envp_ptr, 0)
+
+
+def sys_exec_ptr(path_ptr: int, path_len: int):
+    return invoke_syscall(syscall_exec_number(), path_ptr, path_len, 0, 0, 0)
+
+
+def sys_execve_ptr(path_ptr: int, path_len: int, argv_ptr: int, envp_ptr: int):
+    return invoke_syscall(syscall_exec_number(), path_ptr, path_len, argv_ptr, envp_ptr, 0)
+
+
+def sys_exec_cstring(path: cobj):
+    length = sys_cstring_len(path)
+    buf = alloc_bytes(length + 1)
+    dst = Ptr[byte](buf)
+    i = 0
+    while i < length:
+        dst[i] = path[i]
+        i += 1
+    dst[length] = byte(0)
+    return sys_exec_ptr(buf, length)
 
 
 def sys_cstring_len(msg: cobj):
@@ -422,6 +648,7 @@ def syscall_self_test():
 
     sys_write("syscall self-test begin\n".c_str())
     console_write_label_u64("sys.pid=".c_str(), sys_getpid())
+    console_write_label_u64("sys.ppid=".c_str(), sys_getppid())
     console_write_label_u64("sys.ticks=".c_str(), sys_clock_ticks())
     console_write_label_u64("sys.runnable=".c_str(), scheduler_runnable_count(active_scheduler_state()))
     file_fd = sys_open_ptr(file_path, 10, 0)

@@ -26,12 +26,40 @@ def elf_data_little():
     return 1
 
 
+def elf_type_exec():
+    return 2
+
+
 def elf_machine_x86_64():
     return 62
 
 
 def elf_pt_load():
     return 1
+
+
+def elf_pf_x():
+    return 1
+
+
+def elf_pf_w():
+    return 2
+
+
+def elf_pf_r():
+    return 4
+
+
+def elf_page_size():
+    return 4096
+
+
+def elf_max_user_pages():
+    return 64
+
+
+def elf_align_up(value: int, align: int):
+    return (value + align - 1) & ~(align - 1)
 
 
 def elf_u16(image_ptr: int, image_len: int, offset: int):
@@ -74,6 +102,8 @@ def elf_validate_header(image_ptr: int, image_len: int):
     if load_byte_region(image_ptr, image_len, 4) != elf_class_64():
         return False
     if load_byte_region(image_ptr, image_len, 5) != elf_data_little():
+        return False
+    if elf_u16(image_ptr, image_len, 16) != elf_type_exec():
         return False
     if elf_u16(image_ptr, image_len, 18) != elf_machine_x86_64():
         return False
@@ -124,46 +154,141 @@ def elf_segment_memsz(image_ptr: int, image_len: int, ph_index: int):
     return elf_u64(image_ptr, image_len, elf_segment_offset(image_ptr, image_len, ph_index) + 40)
 
 
-def elf_find_first_load_segment(image_ptr: int, image_len: int):
+def elf_segment_is_user_load(image_ptr: int, image_len: int, ph_index: int):
+    if elf_segment_type(image_ptr, image_len, ph_index) != elf_pt_load():
+        return False
+    return elf_segment_memsz(image_ptr, image_len, ph_index) > 0
+
+
+def elf_user_load_segment_count(image_ptr: int, image_len: int):
     ph_index = 0
-    phnum = elf_phnum(image_ptr, image_len)
-    while ph_index < phnum:
-        if elf_segment_type(image_ptr, image_len, ph_index) == elf_pt_load():
-            return ph_index
+    load_count = 0
+    while ph_index < elf_phnum(image_ptr, image_len):
+        if elf_segment_is_user_load(image_ptr, image_len, ph_index):
+            load_count += 1
+        ph_index += 1
+    return load_count
+
+
+def elf_user_load_segment_ph_index(image_ptr: int, image_len: int, load_index: int):
+    ph_index = 0
+    current = 0
+    while ph_index < elf_phnum(image_ptr, image_len):
+        if elf_segment_is_user_load(image_ptr, image_len, ph_index):
+            if current == load_index:
+                return ph_index
+            current += 1
         ph_index += 1
     return -1
 
 
+def elf_user_segment_vaddr(image_ptr: int, image_len: int, load_index: int):
+    ph_index = elf_user_load_segment_ph_index(image_ptr, image_len, load_index)
+    if ph_index < 0:
+        panic("missing user elf vaddr".c_str())
+    return elf_segment_vaddr(image_ptr, image_len, ph_index)
+
+
+def elf_user_segment_offset(image_ptr: int, image_len: int, load_index: int):
+    ph_index = elf_user_load_segment_ph_index(image_ptr, image_len, load_index)
+    if ph_index < 0:
+        panic("missing user elf segment".c_str())
+    return elf_segment_file_offset(image_ptr, image_len, ph_index)
+
+
+def elf_user_segment_filesz(image_ptr: int, image_len: int, load_index: int):
+    ph_index = elf_user_load_segment_ph_index(image_ptr, image_len, load_index)
+    if ph_index < 0:
+        panic("missing user elf filesz".c_str())
+    return elf_segment_filesz(image_ptr, image_len, ph_index)
+
+
+def elf_user_segment_memsz(image_ptr: int, image_len: int, load_index: int):
+    ph_index = elf_user_load_segment_ph_index(image_ptr, image_len, load_index)
+    if ph_index < 0:
+        panic("missing user elf memsz".c_str())
+    return elf_segment_memsz(image_ptr, image_len, ph_index)
+
+
+def elf_user_segment_flags(image_ptr: int, image_len: int, load_index: int):
+    ph_index = elf_user_load_segment_ph_index(image_ptr, image_len, load_index)
+    if ph_index < 0:
+        panic("missing user elf flags".c_str())
+    return elf_segment_flags(image_ptr, image_len, ph_index)
+
+
+def elf_user_image_top(image_ptr: int, image_len: int):
+    load_index = 0
+    image_top = 0
+    while load_index < elf_user_load_segment_count(image_ptr, image_len):
+        seg_top = elf_user_segment_vaddr(image_ptr, image_len, load_index) + elf_user_segment_memsz(image_ptr, image_len, load_index)
+        if seg_top > image_top:
+            image_top = seg_top
+        load_index += 1
+    return image_top
+
+
+def elf_user_image_page_count(image_ptr: int, image_len: int):
+    return elf_align_up(elf_user_image_top(image_ptr, image_len), elf_page_size()) >> 12
+
+
+def elf_entry_in_load_segment(image_ptr: int, image_len: int):
+    entry = elf_entry_offset(image_ptr, image_len)
+    load_index = 0
+    while load_index < elf_user_load_segment_count(image_ptr, image_len):
+        seg_start = elf_user_segment_vaddr(image_ptr, image_len, load_index)
+        seg_end = seg_start + elf_user_segment_memsz(image_ptr, image_len, load_index)
+        if entry >= seg_start and entry < seg_end:
+            return True
+        load_index += 1
+    return False
+
+
 def elf_validate_user_image(image_ptr: int, image_len: int):
-    ph_index = 0
-    seg_offset = 0
-    seg_vaddr = 0
-    seg_filesz = 0
-    seg_memsz = 0
+    load_count = 0
+    i = 0
+    j = 0
 
     if not elf_validate_header(image_ptr, image_len):
         return False
     if elf_phentsize(image_ptr, image_len) < 56:
         return False
 
-    ph_index = elf_find_first_load_segment(image_ptr, image_len)
-    if ph_index < 0:
+    load_count = elf_user_load_segment_count(image_ptr, image_len)
+    if load_count <= 0:
         return False
 
-    seg_offset = elf_segment_file_offset(image_ptr, image_len, ph_index)
-    seg_vaddr = elf_segment_vaddr(image_ptr, image_len, ph_index)
-    seg_filesz = elf_segment_filesz(image_ptr, image_len, ph_index)
-    seg_memsz = elf_segment_memsz(image_ptr, image_len, ph_index)
+    i = 0
+    while i < load_count:
+        seg_offset = elf_user_segment_offset(image_ptr, image_len, i)
+        seg_vaddr = elf_user_segment_vaddr(image_ptr, image_len, i)
+        seg_filesz = elf_user_segment_filesz(image_ptr, image_len, i)
+        seg_memsz = elf_user_segment_memsz(image_ptr, image_len, i)
+        seg_page_end = elf_align_up(seg_vaddr + seg_memsz, elf_page_size()) >> 12
 
-    if seg_vaddr != 0:
+        if (seg_vaddr & (elf_page_size() - 1)) != 0:
+            return False
+        if seg_memsz <= 0 or seg_memsz < seg_filesz:
+            return False
+        if seg_offset + seg_filesz > image_len:
+            return False
+        if seg_page_end > elf_max_user_pages():
+            return False
+
+        j = i + 1
+        while j < load_count:
+            other_start = elf_user_segment_vaddr(image_ptr, image_len, j)
+            other_end = other_start + elf_user_segment_memsz(image_ptr, image_len, j)
+            if seg_vaddr < other_end and other_start < seg_vaddr + seg_memsz:
+                return False
+            j += 1
+        i += 1
+
+    if elf_user_image_page_count(image_ptr, image_len) <= 0:
         return False
-    if seg_filesz <= 0 or seg_filesz > 4096:
+    if elf_user_image_page_count(image_ptr, image_len) > elf_max_user_pages():
         return False
-    if seg_memsz < seg_filesz or seg_memsz > 4096:
-        return False
-    if seg_offset + seg_filesz > image_len:
-        return False
-    if elf_entry_offset(image_ptr, image_len) >= seg_memsz:
+    if not elf_entry_in_load_segment(image_ptr, image_len):
         return False
     return True
 
@@ -172,31 +297,3 @@ def elf_user_entry_offset(image_ptr: int, image_len: int):
     if not elf_validate_user_image(image_ptr, image_len):
         panic("invalid user elf".c_str())
     return elf_entry_offset(image_ptr, image_len)
-
-
-def elf_user_segment_offset(image_ptr: int, image_len: int):
-    ph_index = elf_find_first_load_segment(image_ptr, image_len)
-    if ph_index < 0:
-        panic("missing user elf segment".c_str())
-    return elf_segment_file_offset(image_ptr, image_len, ph_index)
-
-
-def elf_user_segment_filesz(image_ptr: int, image_len: int):
-    ph_index = elf_find_first_load_segment(image_ptr, image_len)
-    if ph_index < 0:
-        panic("missing user elf filesz".c_str())
-    return elf_segment_filesz(image_ptr, image_len, ph_index)
-
-
-def elf_user_segment_memsz(image_ptr: int, image_len: int):
-    ph_index = elf_find_first_load_segment(image_ptr, image_len)
-    if ph_index < 0:
-        panic("missing user elf memsz".c_str())
-    return elf_segment_memsz(image_ptr, image_len, ph_index)
-
-
-def elf_user_segment_flags(image_ptr: int, image_len: int):
-    ph_index = elf_find_first_load_segment(image_ptr, image_len)
-    if ph_index < 0:
-        panic("missing user elf flags".c_str())
-    return elf_segment_flags(image_ptr, image_len, ph_index)

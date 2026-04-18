@@ -80,10 +80,10 @@ EFI_APP = $(BUILD_DIR)/BOOTX64.EFI
 UEFI_DISK = $(BUILD_DIR)/$(UEFI_DISK_NAME).img
 INITRAMFS_IMAGE = $(BUILD_DIR)/initramfs.bin
 USER_BUILD_DIR = $(BUILD_DIR)/user
-USER_DEMO_OBJ = $(USER_BUILD_DIR)/demo.o
-USER_HELLO_OBJ = $(USER_BUILD_DIR)/hello.o
-USER_DEMO_ELF = $(USER_BUILD_DIR)/demo.elf
-USER_HELLO_ELF = $(USER_BUILD_DIR)/hello.elf
+USER_ASM_SRCS = $(wildcard $(USER_DIR)/*.s)
+USER_NAMES = $(notdir $(basename $(USER_ASM_SRCS)))
+USER_OBJS = $(patsubst %,$(USER_BUILD_DIR)/%.o,$(USER_NAMES))
+USER_ELFS = $(patsubst %,$(USER_BUILD_DIR)/%.elf,$(USER_NAMES))
 INITRAMFS_STAGE_DIR = $(BUILD_DIR)/initramfs-root
 INITRAMFS_STAGE_STAMP = $(BUILD_DIR)/initramfs-root.stamp
 
@@ -116,27 +116,19 @@ $(EFI_APP): $(EFI_ENTRY_OBJ) $(EFI_LOADER_OBJ)
 	$(LD) $(EFI_LDFLAGS) -o $@ $(EFI_ENTRY_OBJ) $(EFI_LOADER_OBJ)
 	$(OBJCOPY) --remove-section .comment --remove-section .eh_frame --remove-section .note.gnu.property $@
 
-$(USER_DEMO_OBJ): $(USER_DIR)/demo.s
+$(USER_BUILD_DIR)/%.o: $(USER_DIR)/%.s
 	@mkdir -p $(USER_BUILD_DIR)
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(USER_HELLO_OBJ): $(USER_DIR)/hello.s
-	@mkdir -p $(USER_BUILD_DIR)
-	$(AS) $(ASFLAGS) $< -o $@
+$(USER_BUILD_DIR)/%.elf: $(USER_BUILD_DIR)/%.o $(USER_DIR)/linker.ld
+	$(LD) -m elf_x86_64 -nostdlib -T $(USER_DIR)/linker.ld -o $@ $<
 
-$(USER_DEMO_ELF): $(USER_DEMO_OBJ) $(USER_DIR)/linker.ld
-	$(LD) -m elf_x86_64 -nostdlib -T $(USER_DIR)/linker.ld -o $@ $(USER_DEMO_OBJ)
-
-$(USER_HELLO_ELF): $(USER_HELLO_OBJ) $(USER_DIR)/linker.ld
-	$(LD) -m elf_x86_64 -nostdlib -T $(USER_DIR)/linker.ld -o $@ $(USER_HELLO_OBJ)
-
-$(INITRAMFS_STAGE_STAMP): $(INITRAMFS_SRCS) $(USER_SRCS) $(USER_DEMO_ELF) $(USER_HELLO_ELF)
+$(INITRAMFS_STAGE_STAMP): $(INITRAMFS_SRCS) $(USER_SRCS) $(USER_ELFS)
 	@rm -rf $(INITRAMFS_STAGE_DIR)
 	@mkdir -p $(INITRAMFS_STAGE_DIR)
 	cp -R $(INITRAMFS_DIR)/. $(INITRAMFS_STAGE_DIR)
 	@mkdir -p $(INITRAMFS_STAGE_DIR)/bin
-	cp -f $(USER_DEMO_ELF) $(INITRAMFS_STAGE_DIR)/bin/demo
-	cp -f $(USER_HELLO_ELF) $(INITRAMFS_STAGE_DIR)/bin/hello
+	for elf in $(USER_ELFS); do cp -f $$elf $(INITRAMFS_STAGE_DIR)/bin/$$(basename $$elf .elf); done
 	@touch $@
 
 $(INITRAMFS_IMAGE): scripts/build-initramfs.py $(INITRAMFS_STAGE_STAMP)

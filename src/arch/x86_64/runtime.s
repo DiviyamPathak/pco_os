@@ -279,15 +279,20 @@ get_user_hello_entry_addr_asm:
     ret
 
 enter_user_mode_asm:
+    mov r9, rdi
+    mov r10, rsi
+    mov rdi, rdx
+    mov rsi, rcx
+    mov rdx, r8
     mov ax, 0x23
     mov ds, ax
     mov es, ax
     push qword 0x23
-    push rsi
+    push r10
     pushfq
     or qword [rsp], 0x200
     push qword 0x1B
-    push rdi
+    push r9
     iretq
 
 invoke_syscall_asm:
@@ -313,6 +318,9 @@ task_trampoline_asm:
 user_task_trampoline_asm:
     mov rdi, r12
     mov rsi, r13
+    mov rdx, rbx
+    mov rcx, rbp
+    mov r8, r14
     call enter_user_mode_asm
     xor edi, edi
     call task_returned

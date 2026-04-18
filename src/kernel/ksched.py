@@ -2,10 +2,15 @@ from kconsole import console_write
 from kconsole import console_write_label_u64
 from kconsole import console_write_line
 from kconsole import console_write_u64
-from kelf import elf_user_entry_offset
+from kelf import elf_pf_w
+from kelf import elf_user_image_page_count
+from kelf import elf_user_load_segment_count
 from kelf import elf_user_segment_filesz
 from kelf import elf_user_segment_flags
+from kelf import elf_user_segment_memsz
 from kelf import elf_user_segment_offset
+from kelf import elf_user_segment_vaddr
+from kelf import elf_user_entry_offset
 from kelf import elf_validate_user_image
 from khal import context_switch
 from khal import load_cr3
@@ -20,6 +25,7 @@ from kmemory import vmm_clone_kernel_address_space
 from kmemory import vmm_free_cloned_address_space
 from kmemory import vmm_map_page_root
 from kmemory import vmm_state_qword
+from kmemory import vmm_translate_root
 from kmemory import vmm_unmap_page_root
 from kmemory import zero_page
 from kvfs import vfs_alloc_console_in_descriptor
@@ -120,11 +126,11 @@ def task_slot_user_limit():
     return 12
 
 
-def task_slot_user_code_phys():
+def task_slot_user_page_array_ptr():
     return 13
 
 
-def task_slot_user_data_phys():
+def task_slot_user_page_count():
     return 14
 
 
@@ -148,8 +154,12 @@ def task_slot_fd3_kind():
     return 19
 
 
-def task_slot_limit():
+def task_slot_parent_pid():
     return 20
+
+
+def task_slot_limit():
+    return 21
 
 
 def task_state_empty():
@@ -204,20 +214,28 @@ def user_task_region_base(task_id: int):
     return 0x20000000 + task_id * 0x200000
 
 
-def user_task_code_virt(task_id: int):
-    return user_task_region_base(task_id)
+def user_task_region_size():
+    return 0x200000
 
 
-def user_task_stack_virt(task_id: int):
-    return user_task_region_base(task_id) + 0x1000
+def user_page_size():
+    return 4096
 
 
-def user_task_data_virt(task_id: int):
-    return user_task_region_base(task_id) + 0x2000
+def max_user_mapped_pages():
+    return 65
 
 
-def user_task_stack_top(task_id: int):
-    return user_task_region_base(task_id) + 0x2000
+def user_task_page_virt(task_id: int, page_index: int):
+    return user_task_region_base(task_id) + page_index * user_page_size()
+
+
+def user_task_stack_base_virt(task_id: int, page_count: int):
+    return user_task_page_virt(task_id, page_count - 1)
+
+
+def user_task_stack_top(task_id: int, page_count: int):
+    return user_task_page_virt(task_id, page_count)
 
 
 def task_kernel_rsp0_top(stack_base: int):
@@ -412,16 +430,20 @@ def scheduler_task_user_limit(state_ptr: int, task_id: int):
     return scheduler_task_qword(scheduler_task_table_ptr(state_ptr), task_id, task_slot_user_limit())
 
 
-def scheduler_task_user_code_phys(state_ptr: int, task_id: int):
-    return scheduler_task_qword(scheduler_task_table_ptr(state_ptr), task_id, task_slot_user_code_phys())
+def scheduler_task_user_page_array_ptr(state_ptr: int, task_id: int):
+    return scheduler_task_qword(scheduler_task_table_ptr(state_ptr), task_id, task_slot_user_page_array_ptr())
 
 
-def scheduler_task_user_data_phys(state_ptr: int, task_id: int):
-    return scheduler_task_qword(scheduler_task_table_ptr(state_ptr), task_id, task_slot_user_data_phys())
+def scheduler_task_user_page_count(state_ptr: int, task_id: int):
+    return scheduler_task_qword(scheduler_task_table_ptr(state_ptr), task_id, task_slot_user_page_count())
 
 
 def scheduler_task_user_stack_phys(state_ptr: int, task_id: int):
     return scheduler_task_qword(scheduler_task_table_ptr(state_ptr), task_id, task_slot_user_stack_phys())
+
+
+def scheduler_task_parent_pid(state_ptr: int, task_id: int):
+    return scheduler_task_qword(scheduler_task_table_ptr(state_ptr), task_id, task_slot_parent_pid())
 
 
 def scheduler_pmm_state(state_ptr: int):
@@ -507,7 +529,7 @@ def scheduler_clear_task(task_table_ptr: int, task_id: int):
         slot += 1
 
 
-def scheduler_set_task(state_ptr: int, task_id: int, state: int, name_tag: int, ctx_ptr: int, stack_base: int, mode: int, cr3: int, user_base: int, user_limit: int, user_code_phys: int, user_data_phys: int, user_stack_phys: int):
+def scheduler_set_task(state_ptr: int, task_id: int, state: int, name_tag: int, ctx_ptr: int, stack_base: int, mode: int, cr3: int, user_base: int, user_limit: int, user_page_array_ptr: int, user_page_count: int, user_stack_phys: int, parent_pid: int):
     task_table_ptr = scheduler_task_table_ptr(state_ptr)
     set_scheduler_task_qword(task_table_ptr, task_id, task_slot_id(), task_id)
     set_scheduler_task_qword(task_table_ptr, task_id, task_slot_state(), state)
@@ -522,9 +544,10 @@ def scheduler_set_task(state_ptr: int, task_id: int, state: int, name_tag: int, 
     set_scheduler_task_qword(task_table_ptr, task_id, task_slot_cr3(), cr3)
     set_scheduler_task_qword(task_table_ptr, task_id, task_slot_user_base(), user_base)
     set_scheduler_task_qword(task_table_ptr, task_id, task_slot_user_limit(), user_limit)
-    set_scheduler_task_qword(task_table_ptr, task_id, task_slot_user_code_phys(), user_code_phys)
-    set_scheduler_task_qword(task_table_ptr, task_id, task_slot_user_data_phys(), user_data_phys)
+    set_scheduler_task_qword(task_table_ptr, task_id, task_slot_user_page_array_ptr(), user_page_array_ptr)
+    set_scheduler_task_qword(task_table_ptr, task_id, task_slot_user_page_count(), user_page_count)
     set_scheduler_task_qword(task_table_ptr, task_id, task_slot_user_stack_phys(), user_stack_phys)
+    set_scheduler_task_qword(task_table_ptr, task_id, task_slot_parent_pid(), parent_pid)
     scheduler_init_task_fds(state_ptr, task_id)
 
 
@@ -545,40 +568,232 @@ def scheduler_prepare_kernel_task_context(task_id: int):
     return ctx_ptr, stack_base
 
 
-def scheduler_prepare_user_task_context(task_id: int, user_rip: int, user_rsp: int):
-    ctx_ptr = alloc_bytes(context_slot_limit() * 8)
-    stack_base = alloc_bytes(task_stack_size())
+def scheduler_configure_user_task_context(ctx_ptr: int, stack_base: int, task_id: int, user_rip: int, user_rsp: int, argc: int, argv_ptr: int, envp_ptr: int):
     stack_top = align_down(stack_base + task_stack_size(), 16)
     initial_rsp = stack_top - 8
 
     store_qword_region(initial_rsp, 1, 0, user_task_trampoline_addr())
     set_task_context_qword(ctx_ptr, context_slot_rsp(), initial_rsp)
-    set_task_context_qword(ctx_ptr, context_slot_rbx(), 0)
-    set_task_context_qword(ctx_ptr, context_slot_rbp(), 0)
+    set_task_context_qword(ctx_ptr, context_slot_rbx(), argc)
+    set_task_context_qword(ctx_ptr, context_slot_rbp(), argv_ptr)
     set_task_context_qword(ctx_ptr, context_slot_r12(), user_rip)
     set_task_context_qword(ctx_ptr, context_slot_r13(), user_rsp)
-    set_task_context_qword(ctx_ptr, context_slot_r14(), user_task_data_virt(task_id))
+    set_task_context_qword(ctx_ptr, context_slot_r14(), envp_ptr)
     set_task_context_qword(ctx_ptr, context_slot_r15(), 0)
     return ctx_ptr, stack_base
 
 
-def elf_flag_write():
-    return 2
+def scheduler_prepare_user_task_context(task_id: int, user_rip: int, user_rsp: int, argc: int, argv_ptr: int, envp_ptr: int):
+    ctx_ptr = alloc_bytes(context_slot_limit() * 8)
+    stack_base = alloc_bytes(task_stack_size())
+    return scheduler_configure_user_task_context(ctx_ptr, stack_base, task_id, user_rip, user_rsp, argc, argv_ptr, envp_ptr)
 
 
-def scheduler_copy_user_segment(image_ptr: int, image_len: int, code_phys: int):
-    seg_offset = elf_user_segment_offset(image_ptr, image_len)
-    seg_filesz = elf_user_segment_filesz(image_ptr, image_len)
-    i = 0
+def exec_vec_entry_ptr(vec_ptr: int, index: int):
+    return vec_ptr + index * 16
 
-    zero_page(code_phys)
-    while i < seg_filesz:
-        store_byte_region(code_phys, 4096, i, load_byte_region(image_ptr, image_len, seg_offset + i))
-        i += 1
+
+def exec_vec_arg_ptr(vec_ptr: int, index: int):
+    return load_qword_region(exec_vec_entry_ptr(vec_ptr, index), 2, 0)
+
+
+def exec_vec_arg_len(vec_ptr: int, index: int):
+    return load_qword_region(exec_vec_entry_ptr(vec_ptr, index), 2, 1)
+
+
+def scheduler_copy_stack_string(stack_phys: int, stack_top_off: int, src_ptr: int, src_len: int):
+    copied = 0
+    stack_top_off -= src_len + 1
+    while copied < src_len:
+        store_byte_region(stack_phys, user_page_size(), stack_top_off + copied, load_byte_region(src_ptr, src_len, copied))
+        copied += 1
+    store_byte_region(stack_phys, user_page_size(), stack_top_off + src_len, 0)
+    return stack_top_off
+
+
+def scheduler_build_user_initial_stack(task_id: int, page_count: int, page_array_ptr: int, argvec_ptr: int, arg_count: int, envvec_ptr: int, env_count: int):
+    stack_phys = user_page_array_qword(page_array_ptr, page_count, page_count - 1)
+    stack_base = user_task_stack_base_virt(task_id, page_count)
+    arg_user_ptrs = 0
+    env_user_ptrs = 0
+    stack_top_off = user_page_size()
+    argv_ptr = 0
+    envp_ptr = 0
+    index = 0
+
+    if arg_count > 0:
+        arg_user_ptrs = alloc_bytes(arg_count * 8)
+    if env_count > 0:
+        env_user_ptrs = alloc_bytes(env_count * 8)
+
+    index = env_count - 1
+    while index >= 0:
+        stack_top_off = scheduler_copy_stack_string(stack_phys, stack_top_off, exec_vec_arg_ptr(envvec_ptr, index), exec_vec_arg_len(envvec_ptr, index))
+        store_qword_region(env_user_ptrs, env_count, index, stack_base + stack_top_off)
+        index -= 1
+
+    index = arg_count - 1
+    while index >= 0:
+        stack_top_off = scheduler_copy_stack_string(stack_phys, stack_top_off, exec_vec_arg_ptr(argvec_ptr, index), exec_vec_arg_len(argvec_ptr, index))
+        store_qword_region(arg_user_ptrs, arg_count, index, stack_base + stack_top_off)
+        index -= 1
+
+    stack_top_off = align_down(stack_top_off, 16)
+    stack_top_off -= (env_count + 1) * 8
+    envp_ptr = stack_base + stack_top_off
+    index = 0
+    while index < env_count:
+        store_qword_region(stack_phys + stack_top_off, env_count + 1, index, load_qword_region(env_user_ptrs, env_count, index))
+        index += 1
+    store_qword_region(stack_phys + stack_top_off, env_count + 1, env_count, 0)
+
+    stack_top_off -= (arg_count + 1) * 8
+    argv_ptr = stack_base + stack_top_off
+    index = 0
+    while index < arg_count:
+        store_qword_region(stack_phys + stack_top_off, arg_count + 1, index, load_qword_region(arg_user_ptrs, arg_count, index))
+        index += 1
+    store_qword_region(stack_phys + stack_top_off, arg_count + 1, arg_count, 0)
+
+    stack_top_off -= 8
+    store_qword_region(stack_phys + stack_top_off, 1, 0, arg_count)
+    return stack_base + stack_top_off, arg_count, argv_ptr, envp_ptr
+
+
+def user_page_array_qword(page_array_ptr: int, page_count: int, slot: int):
+    return load_qword_region(page_array_ptr, page_count, slot)
+
+
+def set_user_page_array_qword(page_array_ptr: int, page_count: int, slot: int, value: int):
+    store_qword_region(page_array_ptr, page_count, slot, value)
+
+
+def scheduler_user_page_flags_default():
+    return 0x005
+
+
+def scheduler_user_page_flags_writable():
+    return 0x007
+
+
+def scheduler_user_image_total_pages(image_ptr: int, image_len: int):
+    return elf_user_image_page_count(image_ptr, image_len) + 1
+
+
+def scheduler_set_page_flags(page_flags_ptr: int, image_page_count: int, page_index: int, value: int):
+    store_qword_region(page_flags_ptr, image_page_count, page_index, value)
+
+
+def scheduler_page_flags(page_flags_ptr: int, image_page_count: int, page_index: int):
+    return load_qword_region(page_flags_ptr, image_page_count, page_index)
+
+
+def scheduler_prepare_user_image_pages(state_ptr: int, task_id: int, pmm_state: int, image_ptr: int, image_len: int):
+    image_page_count = elf_user_image_page_count(image_ptr, image_len)
+    page_count = image_page_count + 1
+    page_array_ptr = alloc_bytes(page_count * 8)
+    page_flags_ptr = alloc_bytes(image_page_count * 8)
+    load_index = 0
+    page_index = 0
+
+    if page_count <= 1 or page_count > max_user_mapped_pages():
+        panic("user image page count invalid".c_str())
+
+    while page_index < image_page_count:
+        scheduler_set_page_flags(page_flags_ptr, image_page_count, page_index, scheduler_user_page_flags_default())
+        page_index += 1
+
+    page_index = 0
+    while page_index < page_count:
+        phys = pmm_alloc_page(pmm_state)
+        if phys == 0:
+            panic("scheduler user image alloc failed".c_str())
+        zero_page(phys)
+        set_user_page_array_qword(page_array_ptr, page_count, page_index, phys)
+        page_index += 1
+
+    while load_index < elf_user_load_segment_count(image_ptr, image_len):
+        seg_offset = elf_user_segment_offset(image_ptr, image_len, load_index)
+        seg_vaddr = elf_user_segment_vaddr(image_ptr, image_len, load_index)
+        seg_filesz = elf_user_segment_filesz(image_ptr, image_len, load_index)
+        seg_memsz = elf_user_segment_memsz(image_ptr, image_len, load_index)
+        seg_flags = elf_user_segment_flags(image_ptr, image_len, load_index)
+        seg_page = seg_vaddr >> 12
+        seg_page_end = align_down(seg_vaddr + seg_memsz + user_page_size() - 1, user_page_size()) >> 12
+        copied = 0
+
+        if (seg_flags & elf_pf_w()) != 0:
+            page_index = seg_page
+            while page_index < seg_page_end:
+                scheduler_set_page_flags(page_flags_ptr, image_page_count, page_index, scheduler_user_page_flags_writable())
+                page_index += 1
+
+        while copied < seg_filesz:
+            page_index = (seg_vaddr + copied) >> 12
+            page_off = (seg_vaddr + copied) & (user_page_size() - 1)
+            phys = user_page_array_qword(page_array_ptr, page_count, page_index)
+            store_byte_region(phys, user_page_size(), page_off, load_byte_region(image_ptr, image_len, seg_offset + copied))
+            copied += 1
+        load_index += 1
+
+    return page_array_ptr, page_count, page_flags_ptr
+
+
+def scheduler_map_user_image_pages(state_ptr: int, task_id: int, root_p4: int, pmm_state: int, page_array_ptr: int, page_count: int, page_flags_ptr: int):
+    page_index = 0
+    image_page_count = page_count - 1
+    vmm_state = scheduler_vmm_state(state_ptr)
+    virt = 0
+
+    while page_index < image_page_count:
+        virt = user_task_page_virt(task_id, page_index)
+        if vmm_translate_root(vmm_state, root_p4, virt) != 0:
+            vmm_unmap_page_root(vmm_state, root_p4, pmm_state, virt)
+        vmm_map_page_root(vmm_state, root_p4, pmm_state, virt, user_page_array_qword(page_array_ptr, page_count, page_index), scheduler_page_flags(page_flags_ptr, image_page_count, page_index))
+        page_index += 1
+
+    virt = user_task_stack_base_virt(task_id, page_count)
+    if vmm_translate_root(vmm_state, root_p4, virt) != 0:
+        vmm_unmap_page_root(vmm_state, root_p4, pmm_state, virt)
+    vmm_map_page_root(vmm_state, root_p4, pmm_state, virt, user_page_array_qword(page_array_ptr, page_count, page_count - 1), scheduler_user_page_flags_writable())
+
+
+def scheduler_unmap_user_image_pages(state_ptr: int, root_p4: int, pmm_state: int, user_base: int, page_count: int):
+    page_index = 0
+    vmm_state = scheduler_vmm_state(state_ptr)
+    while page_index < page_count:
+        vmm_unmap_page_root(vmm_state, root_p4, pmm_state, user_base + page_index * user_page_size())
+        page_index += 1
+
+
+def scheduler_release_user_pages(pmm_state: int, page_array_ptr: int, page_count: int):
+    page_index = 0
+    while page_index < page_count:
+        phys = user_page_array_qword(page_array_ptr, page_count, page_index)
+        if phys != 0:
+            pmm_free_page(pmm_state, phys)
+        page_index += 1
+
+
+def scheduler_install_user_image(state_ptr: int, task_id: int, root_p4: int, pmm_state: int, image_ptr: int, image_len: int, argvec_ptr: int, arg_count: int, envvec_ptr: int, env_count: int):
+    page_array_ptr, page_count, page_flags_ptr = scheduler_prepare_user_image_pages(state_ptr, task_id, pmm_state, image_ptr, image_len)
+    user_rsp, user_argc, user_argv_ptr, user_envp_ptr = scheduler_build_user_initial_stack(task_id, page_count, page_array_ptr, argvec_ptr, arg_count, envvec_ptr, env_count)
+    scheduler_map_user_image_pages(state_ptr, task_id, root_p4, pmm_state, page_array_ptr, page_count, page_flags_ptr)
+    return page_array_ptr, page_count, user_task_region_base(task_id) + elf_user_entry_offset(image_ptr, image_len), user_task_region_base(task_id) + page_count * user_page_size(), user_page_array_qword(page_array_ptr, page_count, page_count - 1), user_rsp, user_argc, user_argv_ptr, user_envp_ptr
+
+
+def scheduler_replace_current_user_context(state_ptr: int, task_id: int, user_rip: int, user_rsp: int, argc: int, argv_ptr: int, envp_ptr: int):
+    ctx_ptr = scheduler_task_context_ptr(state_ptr, task_id)
+    stack_base = scheduler_task_stack_base(state_ptr, task_id)
+    scheduler_configure_user_task_context(ctx_ptr, stack_base, task_id, user_rip, user_rsp, argc, argv_ptr, envp_ptr)
+    set_tss_rsp0(task_kernel_rsp0_top(stack_base))
+    load_cr3(scheduler_task_cr3(state_ptr, task_id))
+    restore_task_context(ctx_ptr)
+    panic("scheduler exec returned".c_str())
 
 
 def scheduler_user_code_flags(image_ptr: int, image_len: int):
-    if (elf_user_segment_flags(image_ptr, image_len) & elf_flag_write()) != 0:
+    if (elf_user_segment_flags(image_ptr, image_len, 0) & elf_pf_w()) != 0:
         return 0x007
     return 0x005
 
@@ -640,16 +855,11 @@ def scheduler_destroy_user_task(state_ptr: int, task_id: int):
     pmm_state = scheduler_pmm_state(state_ptr)
     vmm_state = scheduler_vmm_state(state_ptr)
     root_p4 = scheduler_task_cr3(state_ptr, task_id)
-    code_phys = scheduler_task_user_code_phys(state_ptr, task_id)
-    data_phys = scheduler_task_user_data_phys(state_ptr, task_id)
-    stack_phys = scheduler_task_user_stack_phys(state_ptr, task_id)
+    page_array_ptr = scheduler_task_user_page_array_ptr(state_ptr, task_id)
+    page_count = scheduler_task_user_page_count(state_ptr, task_id)
 
-    if code_phys != 0:
-        pmm_free_page(pmm_state, code_phys)
-    if data_phys != 0:
-        pmm_free_page(pmm_state, data_phys)
-    if stack_phys != 0:
-        pmm_free_page(pmm_state, stack_phys)
+    if page_array_ptr != 0 and page_count > 0:
+        scheduler_release_user_pages(pmm_state, page_array_ptr, page_count)
     if root_p4 != 0:
         vmm_free_cloned_address_space(vmm_state, pmm_state, root_p4)
 
@@ -671,42 +881,73 @@ def scheduler_create_user_task(state_ptr: int, name_tag: int):
     panic("scheduler_create_user_task is obsolete; use ELF exec path".c_str())
 
 
-def scheduler_create_user_elf_task(state_ptr: int, name_tag: int, image_ptr: int, image_len: int):
+def scheduler_create_user_elf_task(state_ptr: int, name_tag: int, image_ptr: int, image_len: int, argvec_ptr: int, arg_count: int, envvec_ptr: int, env_count: int):
     task_id = scheduler_find_free_task_id(state_ptr)
     pmm_state = scheduler_pmm_state(state_ptr)
     vmm_state = scheduler_vmm_state(state_ptr)
     user_cr3 = vmm_clone_kernel_address_space(vmm_state, pmm_state)
-    code_phys = pmm_alloc_page(pmm_state)
-    data_phys = pmm_alloc_page(pmm_state)
-    stack_phys = pmm_alloc_page(pmm_state)
     user_base = user_task_region_base(task_id)
-    user_limit = user_base + 0x3000
+    user_limit = 0
     user_rip = 0
-    code_flags = 0
+    page_array_ptr = 0
+    page_count = 0
+    stack_phys = 0
+    user_rsp = 0
+    user_argc = 0
+    user_argv_ptr = 0
+    user_envp_ptr = 0
 
-    if code_phys == 0 or data_phys == 0 or stack_phys == 0:
-        panic("scheduler user task alloc failed".c_str())
     if not elf_validate_user_image(image_ptr, image_len):
         panic("scheduler invalid user elf".c_str())
 
-    scheduler_copy_user_segment(image_ptr, image_len, code_phys)
-    zero_page(data_phys)
-    zero_page(stack_phys)
-    code_flags = scheduler_user_code_flags(image_ptr, image_len)
-    user_rip = user_task_code_virt(task_id) + elf_user_entry_offset(image_ptr, image_len)
-    vmm_unmap_page_root(vmm_state, user_cr3, pmm_state, user_task_code_virt(task_id))
-    vmm_unmap_page_root(vmm_state, user_cr3, pmm_state, user_task_stack_virt(task_id))
-    vmm_unmap_page_root(vmm_state, user_cr3, pmm_state, user_task_data_virt(task_id))
-    vmm_map_page_root(vmm_state, user_cr3, pmm_state, user_task_code_virt(task_id), code_phys, code_flags)
-    vmm_map_page_root(vmm_state, user_cr3, pmm_state, user_task_stack_virt(task_id), stack_phys, 0x007)
-    vmm_map_page_root(vmm_state, user_cr3, pmm_state, user_task_data_virt(task_id), data_phys, 0x007)
-
-    ctx_ptr, stack_base = scheduler_prepare_user_task_context(task_id, user_rip, user_task_stack_top(task_id))
-    scheduler_set_task(state_ptr, task_id, task_state_runnable(), name_tag, ctx_ptr, stack_base, task_mode_user(), user_cr3, user_base, user_limit, code_phys, data_phys, stack_phys)
+    page_array_ptr, page_count, user_rip, user_limit, stack_phys, user_rsp, user_argc, user_argv_ptr, user_envp_ptr = scheduler_install_user_image(state_ptr, task_id, user_cr3, pmm_state, image_ptr, image_len, argvec_ptr, arg_count, envvec_ptr, env_count)
+    ctx_ptr, stack_base = scheduler_prepare_user_task_context(task_id, user_rip, user_rsp, user_argc, user_argv_ptr, user_envp_ptr)
+    scheduler_set_task(state_ptr, task_id, task_state_runnable(), name_tag, ctx_ptr, stack_base, task_mode_user(), user_cr3, user_base, user_limit, page_array_ptr, page_count, stack_phys, scheduler_current_task(state_ptr))
     if task_id >= scheduler_task_count(state_ptr):
         set_scheduler_state_qword(state_ptr, sched_slot_task_count(), task_id + 1)
     scheduler_enqueue_task(state_ptr, task_id)
     return task_id
+
+
+def scheduler_exec_current_task(state_ptr: int, image_ptr: int, image_len: int, argvec_ptr: int, arg_count: int, envvec_ptr: int, env_count: int):
+    current_task = scheduler_current_task(state_ptr)
+    pmm_state = scheduler_pmm_state(state_ptr)
+    root_p4 = scheduler_task_cr3(state_ptr, current_task)
+    old_page_array_ptr = scheduler_task_user_page_array_ptr(state_ptr, current_task)
+    old_page_count = scheduler_task_user_page_count(state_ptr, current_task)
+    user_base = scheduler_task_user_base(state_ptr, current_task)
+    page_array_ptr = 0
+    page_count = 0
+    user_rip = 0
+    user_limit = 0
+    stack_phys = 0
+    page_flags_ptr = 0
+    user_rsp = 0
+    user_argc = 0
+    user_argv_ptr = 0
+    user_envp_ptr = 0
+
+    if scheduler_task_mode(state_ptr, current_task) != task_mode_user():
+        return -1
+    if not elf_validate_user_image(image_ptr, image_len):
+        return -1
+
+    page_array_ptr, page_count, page_flags_ptr = scheduler_prepare_user_image_pages(state_ptr, current_task, pmm_state, image_ptr, image_len)
+    user_rsp, user_argc, user_argv_ptr, user_envp_ptr = scheduler_build_user_initial_stack(current_task, page_count, page_array_ptr, argvec_ptr, arg_count, envvec_ptr, env_count)
+    if old_page_array_ptr != 0 and old_page_count > 0:
+        scheduler_unmap_user_image_pages(state_ptr, root_p4, pmm_state, user_base, old_page_count)
+        scheduler_release_user_pages(pmm_state, old_page_array_ptr, old_page_count)
+    scheduler_map_user_image_pages(state_ptr, current_task, root_p4, pmm_state, page_array_ptr, page_count, page_flags_ptr)
+    user_rip = user_task_region_base(current_task) + elf_user_entry_offset(image_ptr, image_len)
+    user_limit = user_task_region_base(current_task) + page_count * user_page_size()
+    stack_phys = user_page_array_qword(page_array_ptr, page_count, page_count - 1)
+
+    set_scheduler_task_qword(scheduler_task_table_ptr(state_ptr), current_task, task_slot_user_page_array_ptr(), page_array_ptr)
+    set_scheduler_task_qword(scheduler_task_table_ptr(state_ptr), current_task, task_slot_user_page_count(), page_count)
+    set_scheduler_task_qword(scheduler_task_table_ptr(state_ptr), current_task, task_slot_user_limit(), user_limit)
+    set_scheduler_task_qword(scheduler_task_table_ptr(state_ptr), current_task, task_slot_user_stack_phys(), stack_phys)
+    scheduler_replace_current_user_context(state_ptr, current_task, user_rip, user_rsp, user_argc, user_argv_ptr, user_envp_ptr)
+    return 0
 
 
 def scheduler_init_bootstrap_tasks(state_ptr: int, pmm_state: int, vmm_state: int):
@@ -715,8 +956,8 @@ def scheduler_init_bootstrap_tasks(state_ptr: int, pmm_state: int, vmm_state: in
     idle_ctx_ptr, idle_stack_base = scheduler_prepare_kernel_task_context(0)
     task1_ctx_ptr, task1_stack_base = scheduler_prepare_kernel_task_context(1)
 
-    scheduler_set_task(state_ptr, 0, task_state_runnable(), 0, idle_ctx_ptr, idle_stack_base, task_mode_kernel(), kernel_cr3, 0, 0, 0, 0, 0)
-    scheduler_set_task(state_ptr, 1, task_state_runnable(), 1, task1_ctx_ptr, task1_stack_base, task_mode_kernel(), kernel_cr3, 0, 0, 0, 0, 0)
+    scheduler_set_task(state_ptr, 0, task_state_runnable(), 0, idle_ctx_ptr, idle_stack_base, task_mode_kernel(), kernel_cr3, 0, 0, 0, 0, 0, 0)
+    scheduler_set_task(state_ptr, 1, task_state_runnable(), 1, task1_ctx_ptr, task1_stack_base, task_mode_kernel(), kernel_cr3, 0, 0, 0, 0, 0, 0)
 
     set_scheduler_state_qword(state_ptr, sched_slot_task_count(), 2)
     set_scheduler_state_qword(state_ptr, sched_slot_current_task(), 1)
@@ -837,12 +1078,15 @@ def scheduler_exit_current_task(state_ptr: int, exit_code: int):
 
 
 def scheduler_waitpid(state_ptr: int, task_id: int):
+    current_task = scheduler_current_task(state_ptr)
     if task_id < 0 or task_id >= scheduler_task_count(state_ptr):
-        panic("waitpid task id out of range".c_str())
-    if task_id == scheduler_current_task(state_ptr):
-        panic("waitpid cannot target self".c_str())
+        return -1
+    if task_id == current_task:
+        return -1
     if scheduler_task_state(state_ptr, task_id) == task_state_empty():
-        panic("waitpid task slot empty".c_str())
+        return -1
+    if scheduler_task_parent_pid(state_ptr, task_id) != current_task:
+        return -1
 
     while scheduler_task_state(state_ptr, task_id) != task_state_exited():
         scheduler_yield_current_task(state_ptr)

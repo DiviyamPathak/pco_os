@@ -26,7 +26,9 @@ from ksched import scheduler_self_test
 from ksyscall import sys_clock_ticks
 from ksyscall import sys_exit
 from ksyscall import sys_getpid
+from ksyscall import sys_getppid
 from ksyscall import sys_spawn_exec_ptr
+from ksyscall import sys_spawn_execve_ptr
 from ksyscall import sys_waitpid
 from ksyscall import sys_write
 from ksyscall import sys_write_u64
@@ -44,6 +46,7 @@ from kmemory import vmm_self_test
 from ksupport import alloc_bytes
 from ksupport import panic
 from ksupport import store_byte
+from ksupport import store_qword_region
 from kvfs import dump_vfs_summary
 from kvfs import init_vfs
 from kvfs import vfs_self_test
@@ -63,8 +66,15 @@ def idle_task_main():
 def worker_task_one():
     first_child = 0
     second_child = 0
+    third_child = 0
     demo_path = alloc_bytes(16)
-    hello_path = alloc_bytes(16)
+    rwtest_path = alloc_bytes(16)
+    chain_path = alloc_bytes(16)
+    argv_path = alloc_bytes(16)
+    spawn_arg = alloc_bytes(16)
+    spawn_env = alloc_bytes(16)
+    spawn_argv = alloc_bytes(24)
+    spawn_envp = alloc_bytes(16)
 
     store_byte(demo_path + 0, 47)
     store_byte(demo_path + 1, 98)
@@ -76,20 +86,71 @@ def worker_task_one():
     store_byte(demo_path + 7, 109)
     store_byte(demo_path + 8, 111)
     store_byte(demo_path + 9, 0)
-    store_byte(hello_path + 0, 47)
-    store_byte(hello_path + 1, 98)
-    store_byte(hello_path + 2, 105)
-    store_byte(hello_path + 3, 110)
-    store_byte(hello_path + 4, 47)
-    store_byte(hello_path + 5, 104)
-    store_byte(hello_path + 6, 101)
-    store_byte(hello_path + 7, 108)
-    store_byte(hello_path + 8, 108)
-    store_byte(hello_path + 9, 111)
-    store_byte(hello_path + 10, 0)
+    store_byte(rwtest_path + 0, 47)
+    store_byte(rwtest_path + 1, 98)
+    store_byte(rwtest_path + 2, 105)
+    store_byte(rwtest_path + 3, 110)
+    store_byte(rwtest_path + 4, 47)
+    store_byte(rwtest_path + 5, 114)
+    store_byte(rwtest_path + 6, 119)
+    store_byte(rwtest_path + 7, 116)
+    store_byte(rwtest_path + 8, 101)
+    store_byte(rwtest_path + 9, 115)
+    store_byte(rwtest_path + 10, 116)
+    store_byte(rwtest_path + 11, 0)
+    store_byte(chain_path + 0, 47)
+    store_byte(chain_path + 1, 98)
+    store_byte(chain_path + 2, 105)
+    store_byte(chain_path + 3, 110)
+    store_byte(chain_path + 4, 47)
+    store_byte(chain_path + 5, 99)
+    store_byte(chain_path + 6, 104)
+    store_byte(chain_path + 7, 97)
+    store_byte(chain_path + 8, 105)
+    store_byte(chain_path + 9, 110)
+    store_byte(chain_path + 10, 0)
+    store_byte(argv_path + 0, 47)
+    store_byte(argv_path + 1, 98)
+    store_byte(argv_path + 2, 105)
+    store_byte(argv_path + 3, 110)
+    store_byte(argv_path + 4, 47)
+    store_byte(argv_path + 5, 97)
+    store_byte(argv_path + 6, 114)
+    store_byte(argv_path + 7, 103)
+    store_byte(argv_path + 8, 118)
+    store_byte(argv_path + 9, 0)
+    store_byte(spawn_arg + 0, 115)
+    store_byte(spawn_arg + 1, 112)
+    store_byte(spawn_arg + 2, 97)
+    store_byte(spawn_arg + 3, 119)
+    store_byte(spawn_arg + 4, 110)
+    store_byte(spawn_arg + 5, 45)
+    store_byte(spawn_arg + 6, 97)
+    store_byte(spawn_arg + 7, 114)
+    store_byte(spawn_arg + 8, 103)
+    store_byte(spawn_arg + 9, 118)
+    store_byte(spawn_arg + 10, 0)
+    store_byte(spawn_env + 0, 77)
+    store_byte(spawn_env + 1, 79)
+    store_byte(spawn_env + 2, 68)
+    store_byte(spawn_env + 3, 69)
+    store_byte(spawn_env + 4, 61)
+    store_byte(spawn_env + 5, 115)
+    store_byte(spawn_env + 6, 112)
+    store_byte(spawn_env + 7, 97)
+    store_byte(spawn_env + 8, 119)
+    store_byte(spawn_env + 9, 110)
+    store_byte(spawn_env + 10, 0)
+    store_qword_region(spawn_argv, 3, 0, argv_path)
+    store_qword_region(spawn_argv, 3, 1, spawn_arg)
+    store_qword_region(spawn_argv, 3, 2, 0)
+    store_qword_region(spawn_envp, 2, 0, spawn_env)
+    store_qword_region(spawn_envp, 2, 1, 0)
 
     sys_write("task1 start pid=".c_str())
     sys_write_u64(sys_getpid())
+    sys_write(" ppid=".c_str())
+    sys_write_u64(sys_getppid())
     sys_write("\n".c_str())
 
     first_child = sys_spawn_exec_ptr(demo_path, 9)
@@ -108,24 +169,68 @@ def worker_task_one():
     sys_write_u64(sys_clock_ticks())
     sys_write("\n".c_str())
 
-    second_child = sys_spawn_exec_ptr(hello_path, 10)
-    sys_write("task1 respawned pid=".c_str())
+    second_child = sys_spawn_exec_ptr(rwtest_path, 11)
+    sys_write("task1 rwtest pid=".c_str())
     sys_write_u64(second_child)
     sys_write("\n".c_str())
     if second_child < 0:
-        panic("exec hello spawn failed".c_str())
+        panic("exec rwtest spawn failed".c_str())
 
     if second_child != first_child:
         panic("scheduler slot reuse failed".c_str())
 
     status = sys_waitpid(second_child)
-    sys_write("task1 second waitpid=".c_str())
+    sys_write("task1 rwtest waitpid=".c_str())
     sys_write_u64(second_child)
     sys_write(" status=".c_str())
     sys_write_u64(status)
     sys_write(" ticks=".c_str())
     sys_write_u64(sys_clock_ticks())
     sys_write("\n".c_str())
+    if status != 42:
+        panic("rwtest status mismatch".c_str())
+
+    third_child = sys_spawn_execve_ptr(argv_path, 9, spawn_argv, spawn_envp)
+    sys_write("task1 argv pid=".c_str())
+    sys_write_u64(third_child)
+    sys_write("\n".c_str())
+    if third_child < 0:
+        panic("exec argv spawn failed".c_str())
+
+    if third_child != second_child:
+        panic("scheduler slot reuse failed".c_str())
+
+    status = sys_waitpid(third_child)
+    sys_write("task1 argv waitpid=".c_str())
+    sys_write_u64(third_child)
+    sys_write(" status=".c_str())
+    sys_write_u64(status)
+    sys_write(" ticks=".c_str())
+    sys_write_u64(sys_clock_ticks())
+    sys_write("\n".c_str())
+    if status != 33:
+        panic("argv status mismatch".c_str())
+
+    third_child = sys_spawn_exec_ptr(chain_path, 10)
+    sys_write("task1 chain pid=".c_str())
+    sys_write_u64(third_child)
+    sys_write("\n".c_str())
+    if third_child < 0:
+        panic("exec chain spawn failed".c_str())
+
+    if third_child != second_child:
+        panic("scheduler slot reuse failed".c_str())
+
+    status = sys_waitpid(third_child)
+    sys_write("task1 chain waitpid=".c_str())
+    sys_write_u64(third_child)
+    sys_write(" status=".c_str())
+    sys_write_u64(status)
+    sys_write(" ticks=".c_str())
+    sys_write_u64(sys_clock_ticks())
+    sys_write("\n".c_str())
+    if status != 7:
+        panic("chain exec status mismatch".c_str())
     shell_self_test()
     shell_run()
 
