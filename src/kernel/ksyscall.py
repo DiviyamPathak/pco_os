@@ -14,6 +14,7 @@ from ksched import scheduler_set_task_fd_object
 from ksched import scheduler_task_fd_object
 from ksched import scheduler_task_mode
 from ksched import scheduler_task_parent_pid
+from ksched import scheduler_timer_interrupt
 from ksched import scheduler_task_user_base
 from ksched import scheduler_task_user_limit
 from ksched import scheduler_vfs_state
@@ -114,6 +115,11 @@ def active_scheduler_state():
     return state_ptr
 
 
+def syscall_return_with_tick(state_ptr: int, allow_preempt: int, result: int):
+    scheduler_timer_interrupt(state_ptr, allow_preempt)
+    return result
+
+
 def syscall_validate_user_buffer(state_ptr: int, task_id: int, ptr: int, length: int):
     base = scheduler_task_user_base(state_ptr, task_id)
     limit = scheduler_task_user_limit(state_ptr, task_id)
@@ -207,10 +213,10 @@ def syscall_copy_user_exec_vector(state_ptr: int, task_id: int, array_ptr: int, 
         return 0, 0
     if (array_ptr & 0x7) != 0:
         return 0, 0
-    if not syscall_validate_user_buffer(state_ptr, task_id, array_ptr, (max_count + 1) * 8):
-        return 0, 0
     vec_ptr = alloc_bytes(max_count * 16)
     while count < max_count:
+        if not syscall_validate_user_buffer(state_ptr, task_id, array_ptr + count * 8, 8):
+            return 0, 0
         entry_ptr = load_qword_region(array_ptr, max_count + 1, count)
         if entry_ptr == 0:
             return vec_ptr, count
@@ -219,6 +225,8 @@ def syscall_copy_user_exec_vector(state_ptr: int, task_id: int, array_ptr: int, 
             return 0, 0
         set_exec_vec_entry(vec_ptr, count, str_ptr, str_len)
         count += 1
+    if not syscall_validate_user_buffer(state_ptr, task_id, array_ptr + max_count * 8, 8):
+        return 0, 0
     if load_qword_region(array_ptr, max_count + 1, max_count) != 0:
         return 0, 0
     return vec_ptr, count
@@ -445,40 +453,43 @@ def syscall_readdir_kernel_buffer(state_ptr: int, task_id: int, fd: int, ptr: in
 def syscall_dispatch(number: int, a0: int, a1: int, a2: int, a3: int, a4: int, a5: int):
     state_ptr = active_scheduler_state()
     current_task = scheduler_current_task(state_ptr)
+    user_mode = 0
+    if scheduler_task_mode(state_ptr, current_task) == task_mode_user():
+        user_mode = 1
 
     if number == syscall_write_number():
-        if scheduler_task_mode(state_ptr, current_task) == task_mode_user():
-            return syscall_write_user_buffer(state_ptr, current_task, a0, a1, a2)
-        return syscall_write_kernel_buffer(state_ptr, current_task, a0, a1, a2)
+        if user_mode != 0:
+            return syscall_return_with_tick(state_ptr, user_mode, syscall_write_user_buffer(state_ptr, current_task, a0, a1, a2))
+        return syscall_return_with_tick(state_ptr, user_mode, syscall_write_kernel_buffer(state_ptr, current_task, a0, a1, a2))
 
     if number == syscall_open_number():
-        if scheduler_task_mode(state_ptr, current_task) == task_mode_user():
-            return syscall_open_user_path(state_ptr, current_task, a0, a1, a2)
-        return syscall_open_kernel_path(state_ptr, current_task, a0, a1, a2)
+        if user_mode != 0:
+            return syscall_return_with_tick(state_ptr, user_mode, syscall_open_user_path(state_ptr, current_task, a0, a1, a2))
+        return syscall_return_with_tick(state_ptr, user_mode, syscall_open_kernel_path(state_ptr, current_task, a0, a1, a2))
 
     if number == syscall_read_number():
-        if scheduler_task_mode(state_ptr, current_task) == task_mode_user():
-            return syscall_read_user_buffer(state_ptr, current_task, a0, a1, a2)
-        return syscall_read_kernel_buffer(state_ptr, current_task, a0, a1, a2)
+        if user_mode != 0:
+            return syscall_return_with_tick(state_ptr, user_mode, syscall_read_user_buffer(state_ptr, current_task, a0, a1, a2))
+        return syscall_return_with_tick(state_ptr, user_mode, syscall_read_kernel_buffer(state_ptr, current_task, a0, a1, a2))
 
     if number == syscall_fstat_number():
-        if scheduler_task_mode(state_ptr, current_task) == task_mode_user():
-            return syscall_fstat_user_buffer(state_ptr, current_task, a0, a1)
-        return syscall_fstat_kernel_buffer(state_ptr, current_task, a0, a1)
+        if user_mode != 0:
+            return syscall_return_with_tick(state_ptr, user_mode, syscall_fstat_user_buffer(state_ptr, current_task, a0, a1))
+        return syscall_return_with_tick(state_ptr, user_mode, syscall_fstat_kernel_buffer(state_ptr, current_task, a0, a1))
 
     if number == syscall_readdir_number():
-        if scheduler_task_mode(state_ptr, current_task) == task_mode_user():
-            return syscall_readdir_user_buffer(state_ptr, current_task, a0, a1, a2)
-        return syscall_readdir_kernel_buffer(state_ptr, current_task, a0, a1, a2)
+        if user_mode != 0:
+            return syscall_return_with_tick(state_ptr, user_mode, syscall_readdir_user_buffer(state_ptr, current_task, a0, a1, a2))
+        return syscall_return_with_tick(state_ptr, user_mode, syscall_readdir_kernel_buffer(state_ptr, current_task, a0, a1, a2))
 
     if number == syscall_getpid_number():
-        return current_task
+        return syscall_return_with_tick(state_ptr, user_mode, current_task)
 
     if number == syscall_getppid_number():
-        return scheduler_task_parent_pid(state_ptr, current_task)
+        return syscall_return_with_tick(state_ptr, user_mode, scheduler_task_parent_pid(state_ptr, current_task))
 
     if number == syscall_clock_ticks_number():
-        return current_kernel_ticks()
+        return syscall_return_with_tick(state_ptr, user_mode, current_kernel_ticks())
 
     if number == syscall_yield_number():
         return scheduler_yield_current_task(state_ptr)
@@ -496,17 +507,17 @@ def syscall_dispatch(number: int, a0: int, a1: int, a2: int, a3: int, a4: int, a
         return -1
 
     if number == syscall_spawn_exec_number():
-        if scheduler_task_mode(state_ptr, current_task) == task_mode_user():
-            return syscall_spawn_exec_user_path(state_ptr, current_task, a0, a1, a2, a3)
-        return syscall_spawn_exec_kernel_path(state_ptr, current_task, a0, a1, a2, a3)
+        if user_mode != 0:
+            return syscall_return_with_tick(state_ptr, user_mode, syscall_spawn_exec_user_path(state_ptr, current_task, a0, a1, a2, a3))
+        return syscall_return_with_tick(state_ptr, user_mode, syscall_spawn_exec_kernel_path(state_ptr, current_task, a0, a1, a2, a3))
 
     if number == syscall_exec_number():
-        if scheduler_task_mode(state_ptr, current_task) == task_mode_user():
+        if user_mode != 0:
             return syscall_exec_user_path(state_ptr, current_task, a0, a1, a2, a3)
         return syscall_exec_kernel_path(state_ptr, current_task, a0, a1, a2, a3)
 
     if number == syscall_close_number():
-        return syscall_close_fd(state_ptr, current_task, a0)
+        return syscall_return_with_tick(state_ptr, user_mode, syscall_close_fd(state_ptr, current_task, a0))
 
     panic("unknown syscall number".c_str())
 

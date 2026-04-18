@@ -1065,6 +1065,18 @@ def scheduler_yield_current_task(state_ptr: int):
     return scheduler_switch_to_task(state_ptr, old_task, next_task)
 
 
+def scheduler_timer_interrupt(state_ptr: int, allow_preempt: int):
+    now = current_kernel_ticks()
+    delta = scheduler_account_tick(state_ptr, now)
+    if delta == 0:
+        return scheduler_current_task(state_ptr)
+    if allow_preempt == 0:
+        return scheduler_current_task(state_ptr)
+    if scheduler_runnable_count(state_ptr) <= 1:
+        return scheduler_current_task(state_ptr)
+    return scheduler_yield_current_task(state_ptr)
+
+
 def scheduler_exit_current_task(state_ptr: int, exit_code: int):
     current_task = scheduler_current_task(state_ptr)
     if current_task == scheduler_idle_task(state_ptr):

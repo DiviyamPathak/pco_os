@@ -67,10 +67,16 @@ def worker_task_one():
     first_child = 0
     second_child = 0
     third_child = 0
+    fourth_child = 0
+    fifth_child = 0
+    preempt_start = 0
+    preempt_mid = 0
     demo_path = alloc_bytes(16)
     rwtest_path = alloc_bytes(16)
     chain_path = alloc_bytes(16)
     argv_path = alloc_bytes(16)
+    hello_path = alloc_bytes(16)
+    preempt_path = alloc_bytes(16)
     spawn_arg = alloc_bytes(16)
     spawn_env = alloc_bytes(16)
     spawn_argv = alloc_bytes(24)
@@ -119,6 +125,30 @@ def worker_task_one():
     store_byte(argv_path + 7, 103)
     store_byte(argv_path + 8, 118)
     store_byte(argv_path + 9, 0)
+    store_byte(hello_path + 0, 47)
+    store_byte(hello_path + 1, 98)
+    store_byte(hello_path + 2, 105)
+    store_byte(hello_path + 3, 110)
+    store_byte(hello_path + 4, 47)
+    store_byte(hello_path + 5, 104)
+    store_byte(hello_path + 6, 101)
+    store_byte(hello_path + 7, 108)
+    store_byte(hello_path + 8, 108)
+    store_byte(hello_path + 9, 111)
+    store_byte(hello_path + 10, 0)
+    store_byte(preempt_path + 0, 47)
+    store_byte(preempt_path + 1, 98)
+    store_byte(preempt_path + 2, 105)
+    store_byte(preempt_path + 3, 110)
+    store_byte(preempt_path + 4, 47)
+    store_byte(preempt_path + 5, 112)
+    store_byte(preempt_path + 6, 114)
+    store_byte(preempt_path + 7, 101)
+    store_byte(preempt_path + 8, 101)
+    store_byte(preempt_path + 9, 109)
+    store_byte(preempt_path + 10, 112)
+    store_byte(preempt_path + 11, 116)
+    store_byte(preempt_path + 12, 0)
     store_byte(spawn_arg + 0, 115)
     store_byte(spawn_arg + 1, 112)
     store_byte(spawn_arg + 2, 97)
@@ -229,8 +259,47 @@ def worker_task_one():
     sys_write(" ticks=".c_str())
     sys_write_u64(sys_clock_ticks())
     sys_write("\n".c_str())
-    if status != 7:
+    if status != 33:
         panic("chain exec status mismatch".c_str())
+
+    preempt_start = sys_clock_ticks()
+    fourth_child = sys_spawn_exec_ptr(preempt_path, 12)
+    sys_write("task1 preempt slow pid=".c_str())
+    sys_write_u64(fourth_child)
+    sys_write("\n".c_str())
+    if fourth_child < 0:
+        panic("exec preempt spawn failed".c_str())
+
+    fifth_child = sys_spawn_exec_ptr(hello_path, 10)
+    sys_write("task1 preempt fast pid=".c_str())
+    sys_write_u64(fifth_child)
+    sys_write("\n".c_str())
+    if fifth_child < 0:
+        panic("exec hello spawn failed".c_str())
+    if fifth_child == fourth_child:
+        panic("scheduler failed to allocate second live child".c_str())
+
+    status = sys_waitpid(fifth_child)
+    preempt_mid = sys_clock_ticks()
+    sys_write("task1 preempt fast status=".c_str())
+    sys_write_u64(status)
+    sys_write(" ticks=".c_str())
+    sys_write_u64(preempt_mid)
+    sys_write("\n".c_str())
+    if status != 7:
+        panic("preempt fast status mismatch".c_str())
+    if preempt_mid >= preempt_start + 4:
+        panic("timer preemption did not advance fast child early".c_str())
+
+    status = sys_waitpid(fourth_child)
+    sys_write("task1 preempt slow status=".c_str())
+    sys_write_u64(status)
+    sys_write(" ticks=".c_str())
+    sys_write_u64(sys_clock_ticks())
+    sys_write("\n".c_str())
+    if status != 55:
+        panic("preempt slow status mismatch".c_str())
+
     shell_self_test()
     shell_run()
 
