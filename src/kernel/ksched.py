@@ -13,6 +13,7 @@ from kelf import elf_user_segment_vaddr
 from kelf import elf_user_entry_offset
 from kelf import elf_validate_user_image
 from khal import context_switch
+from khal import interrupt_return_trampoline_addr
 from khal import load_cr3
 from khal import restore_task_context
 from khal import set_active_scheduler
@@ -21,7 +22,7 @@ from khal import task_trampoline_addr
 from khal import user_task_trampoline_addr
 from kmemory import pmm_alloc_page
 from kmemory import pmm_free_page
-from kmemory import vmm_clone_kernel_address_space
+from kmemory import vmm_create_task_address_space
 from kmemory import vmm_free_cloned_address_space
 from kmemory import vmm_map_page_root
 from kmemory import vmm_state_qword
@@ -158,8 +159,24 @@ def task_slot_parent_pid():
     return 20
 
 
-def task_slot_limit():
+def task_slot_user_heap_base():
     return 21
+
+
+def task_slot_user_heap_limit():
+    return 22
+
+
+def task_slot_user_heap_break():
+    return 23
+
+
+def task_slot_irq_frame_ptr():
+    return 24
+
+
+def task_slot_limit():
+    return 25
 
 
 def task_state_empty():
@@ -211,7 +228,7 @@ def task_stack_size():
 
 
 def user_task_region_base(task_id: int):
-    return 0x20000000 + task_id * 0x200000
+    return 0x20000000
 
 
 def user_task_region_size():
@@ -223,7 +240,15 @@ def user_page_size():
 
 
 def max_user_mapped_pages():
-    return 65
+    return 69
+
+
+def user_task_heap_pages():
+    return 4
+
+
+def interrupt_frame_qword_count():
+    return 20
 
 
 def user_task_page_virt(task_id: int, page_index: int):
@@ -446,6 +471,22 @@ def scheduler_task_parent_pid(state_ptr: int, task_id: int):
     return scheduler_task_qword(scheduler_task_table_ptr(state_ptr), task_id, task_slot_parent_pid())
 
 
+def scheduler_task_user_heap_base(state_ptr: int, task_id: int):
+    return scheduler_task_qword(scheduler_task_table_ptr(state_ptr), task_id, task_slot_user_heap_base())
+
+
+def scheduler_task_user_heap_limit(state_ptr: int, task_id: int):
+    return scheduler_task_qword(scheduler_task_table_ptr(state_ptr), task_id, task_slot_user_heap_limit())
+
+
+def scheduler_task_user_heap_break(state_ptr: int, task_id: int):
+    return scheduler_task_qword(scheduler_task_table_ptr(state_ptr), task_id, task_slot_user_heap_break())
+
+
+def scheduler_task_irq_frame_ptr(state_ptr: int, task_id: int):
+    return scheduler_task_qword(scheduler_task_table_ptr(state_ptr), task_id, task_slot_irq_frame_ptr())
+
+
 def scheduler_pmm_state(state_ptr: int):
     return scheduler_state_qword(state_ptr, sched_slot_pmm_state())
 
@@ -468,6 +509,10 @@ def scheduler_set_task_wait_ticks(state_ptr: int, task_id: int, value: int):
 
 def scheduler_set_task_exit_code(state_ptr: int, task_id: int, value: int):
     set_scheduler_task_qword(scheduler_task_table_ptr(state_ptr), task_id, task_slot_exit_code(), value)
+
+
+def scheduler_set_task_user_heap_break(state_ptr: int, task_id: int, value: int):
+    set_scheduler_task_qword(scheduler_task_table_ptr(state_ptr), task_id, task_slot_user_heap_break(), value)
 
 
 def task_fd_slot(fd: int):
@@ -529,7 +574,7 @@ def scheduler_clear_task(task_table_ptr: int, task_id: int):
         slot += 1
 
 
-def scheduler_set_task(state_ptr: int, task_id: int, state: int, name_tag: int, ctx_ptr: int, stack_base: int, mode: int, cr3: int, user_base: int, user_limit: int, user_page_array_ptr: int, user_page_count: int, user_stack_phys: int, parent_pid: int):
+def scheduler_set_task(state_ptr: int, task_id: int, state: int, name_tag: int, ctx_ptr: int, stack_base: int, mode: int, cr3: int, user_base: int, user_limit: int, user_page_array_ptr: int, user_page_count: int, user_stack_phys: int, parent_pid: int, user_heap_base: int, user_heap_limit: int, user_heap_break: int, irq_frame_ptr: int):
     task_table_ptr = scheduler_task_table_ptr(state_ptr)
     set_scheduler_task_qword(task_table_ptr, task_id, task_slot_id(), task_id)
     set_scheduler_task_qword(task_table_ptr, task_id, task_slot_state(), state)
@@ -548,6 +593,10 @@ def scheduler_set_task(state_ptr: int, task_id: int, state: int, name_tag: int, 
     set_scheduler_task_qword(task_table_ptr, task_id, task_slot_user_page_count(), user_page_count)
     set_scheduler_task_qword(task_table_ptr, task_id, task_slot_user_stack_phys(), user_stack_phys)
     set_scheduler_task_qword(task_table_ptr, task_id, task_slot_parent_pid(), parent_pid)
+    set_scheduler_task_qword(task_table_ptr, task_id, task_slot_user_heap_base(), user_heap_base)
+    set_scheduler_task_qword(task_table_ptr, task_id, task_slot_user_heap_limit(), user_heap_limit)
+    set_scheduler_task_qword(task_table_ptr, task_id, task_slot_user_heap_break(), user_heap_break)
+    set_scheduler_task_qword(task_table_ptr, task_id, task_slot_irq_frame_ptr(), irq_frame_ptr)
     scheduler_init_task_fds(state_ptr, task_id)
 
 
@@ -587,6 +636,20 @@ def scheduler_prepare_user_task_context(task_id: int, user_rip: int, user_rsp: i
     ctx_ptr = alloc_bytes(context_slot_limit() * 8)
     stack_base = alloc_bytes(task_stack_size())
     return scheduler_configure_user_task_context(ctx_ptr, stack_base, task_id, user_rip, user_rsp, argc, argv_ptr, envp_ptr)
+
+
+def scheduler_configure_interrupt_return_context(ctx_ptr: int, stack_base: int, frame_ptr: int):
+    stack_top = align_down(stack_base + task_stack_size(), 16)
+    initial_rsp = stack_top - 8
+
+    store_qword_region(initial_rsp, 1, 0, interrupt_return_trampoline_addr())
+    set_task_context_qword(ctx_ptr, context_slot_rsp(), initial_rsp)
+    set_task_context_qword(ctx_ptr, context_slot_rbx(), 0)
+    set_task_context_qword(ctx_ptr, context_slot_rbp(), 0)
+    set_task_context_qword(ctx_ptr, context_slot_r12(), frame_ptr)
+    set_task_context_qword(ctx_ptr, context_slot_r13(), 0)
+    set_task_context_qword(ctx_ptr, context_slot_r14(), 0)
+    set_task_context_qword(ctx_ptr, context_slot_r15(), 0)
 
 
 def exec_vec_entry_ptr(vec_ptr: int, index: int):
@@ -677,7 +740,7 @@ def scheduler_user_page_flags_writable():
 
 
 def scheduler_user_image_total_pages(image_ptr: int, image_len: int):
-    return elf_user_image_page_count(image_ptr, image_len) + 1
+    return elf_user_image_page_count(image_ptr, image_len) + user_task_heap_pages() + 1
 
 
 def scheduler_set_page_flags(page_flags_ptr: int, image_page_count: int, page_index: int, value: int):
@@ -689,7 +752,8 @@ def scheduler_page_flags(page_flags_ptr: int, image_page_count: int, page_index:
 
 
 def scheduler_prepare_user_image_pages(state_ptr: int, task_id: int, pmm_state: int, image_ptr: int, image_len: int):
-    image_page_count = elf_user_image_page_count(image_ptr, image_len)
+    file_page_count = elf_user_image_page_count(image_ptr, image_len)
+    image_page_count = file_page_count + user_task_heap_pages()
     page_count = image_page_count + 1
     page_array_ptr = alloc_bytes(page_count * 8)
     page_flags_ptr = alloc_bytes(image_page_count * 8)
@@ -701,6 +765,11 @@ def scheduler_prepare_user_image_pages(state_ptr: int, task_id: int, pmm_state: 
 
     while page_index < image_page_count:
         scheduler_set_page_flags(page_flags_ptr, image_page_count, page_index, scheduler_user_page_flags_default())
+        page_index += 1
+
+    page_index = file_page_count
+    while page_index < image_page_count:
+        scheduler_set_page_flags(page_flags_ptr, image_page_count, page_index, scheduler_user_page_flags_writable())
         page_index += 1
 
     page_index = 0
@@ -779,7 +848,10 @@ def scheduler_install_user_image(state_ptr: int, task_id: int, root_p4: int, pmm
     page_array_ptr, page_count, page_flags_ptr = scheduler_prepare_user_image_pages(state_ptr, task_id, pmm_state, image_ptr, image_len)
     user_rsp, user_argc, user_argv_ptr, user_envp_ptr = scheduler_build_user_initial_stack(task_id, page_count, page_array_ptr, argvec_ptr, arg_count, envvec_ptr, env_count)
     scheduler_map_user_image_pages(state_ptr, task_id, root_p4, pmm_state, page_array_ptr, page_count, page_flags_ptr)
-    return page_array_ptr, page_count, user_task_region_base(task_id) + elf_user_entry_offset(image_ptr, image_len), user_task_region_base(task_id) + page_count * user_page_size(), user_page_array_qword(page_array_ptr, page_count, page_count - 1), user_rsp, user_argc, user_argv_ptr, user_envp_ptr
+    user_base = user_task_region_base(task_id)
+    user_heap_base = user_base + elf_user_image_page_count(image_ptr, image_len) * user_page_size()
+    user_heap_limit = user_task_stack_base_virt(task_id, page_count)
+    return page_array_ptr, page_count, user_base + elf_user_entry_offset(image_ptr, image_len), user_base + page_count * user_page_size(), user_page_array_qword(page_array_ptr, page_count, page_count - 1), user_rsp, user_argc, user_argv_ptr, user_envp_ptr, user_heap_base, user_heap_limit, user_heap_base
 
 
 def scheduler_replace_current_user_context(state_ptr: int, task_id: int, user_rip: int, user_rsp: int, argc: int, argv_ptr: int, envp_ptr: int):
@@ -790,6 +862,32 @@ def scheduler_replace_current_user_context(state_ptr: int, task_id: int, user_ri
     load_cr3(scheduler_task_cr3(state_ptr, task_id))
     restore_task_context(ctx_ptr)
     panic("scheduler exec returned".c_str())
+
+
+def scheduler_copy_interrupt_frame(dst_ptr: int, src_ptr: int):
+    slot = 0
+    while slot < interrupt_frame_qword_count():
+        store_qword_region(dst_ptr, interrupt_frame_qword_count(), slot, load_qword_region(src_ptr, interrupt_frame_qword_count(), slot))
+        slot += 1
+
+
+def scheduler_save_user_irq_context(state_ptr: int, task_id: int, frame_ptr: int):
+    irq_frame_ptr = scheduler_task_irq_frame_ptr(state_ptr, task_id)
+    ctx_ptr = scheduler_task_context_ptr(state_ptr, task_id)
+    stack_base = scheduler_task_stack_base(state_ptr, task_id)
+
+    if irq_frame_ptr == 0:
+        panic("scheduler missing irq frame buffer".c_str())
+
+    scheduler_copy_interrupt_frame(irq_frame_ptr, frame_ptr)
+    scheduler_configure_interrupt_return_context(ctx_ptr, stack_base, irq_frame_ptr)
+
+
+def scheduler_resume_task_context(state_ptr: int, task_id: int):
+    set_tss_rsp0(task_kernel_rsp0_top(scheduler_task_stack_base(state_ptr, task_id)))
+    load_cr3(scheduler_task_cr3(state_ptr, task_id))
+    restore_task_context(scheduler_task_context_ptr(state_ptr, task_id))
+    panic("scheduler resume returned".c_str())
 
 
 def scheduler_user_code_flags(image_ptr: int, image_len: int):
@@ -885,7 +983,7 @@ def scheduler_create_user_elf_task(state_ptr: int, name_tag: int, image_ptr: int
     task_id = scheduler_find_free_task_id(state_ptr)
     pmm_state = scheduler_pmm_state(state_ptr)
     vmm_state = scheduler_vmm_state(state_ptr)
-    user_cr3 = vmm_clone_kernel_address_space(vmm_state, pmm_state)
+    user_cr3 = vmm_create_task_address_space(vmm_state, pmm_state)
     user_base = user_task_region_base(task_id)
     user_limit = 0
     user_rip = 0
@@ -896,13 +994,17 @@ def scheduler_create_user_elf_task(state_ptr: int, name_tag: int, image_ptr: int
     user_argc = 0
     user_argv_ptr = 0
     user_envp_ptr = 0
+    user_heap_base = 0
+    user_heap_limit = 0
+    user_heap_break = 0
+    irq_frame_ptr = alloc_bytes(interrupt_frame_qword_count() * 8)
 
     if not elf_validate_user_image(image_ptr, image_len):
         panic("scheduler invalid user elf".c_str())
 
-    page_array_ptr, page_count, user_rip, user_limit, stack_phys, user_rsp, user_argc, user_argv_ptr, user_envp_ptr = scheduler_install_user_image(state_ptr, task_id, user_cr3, pmm_state, image_ptr, image_len, argvec_ptr, arg_count, envvec_ptr, env_count)
+    page_array_ptr, page_count, user_rip, user_limit, stack_phys, user_rsp, user_argc, user_argv_ptr, user_envp_ptr, user_heap_base, user_heap_limit, user_heap_break = scheduler_install_user_image(state_ptr, task_id, user_cr3, pmm_state, image_ptr, image_len, argvec_ptr, arg_count, envvec_ptr, env_count)
     ctx_ptr, stack_base = scheduler_prepare_user_task_context(task_id, user_rip, user_rsp, user_argc, user_argv_ptr, user_envp_ptr)
-    scheduler_set_task(state_ptr, task_id, task_state_runnable(), name_tag, ctx_ptr, stack_base, task_mode_user(), user_cr3, user_base, user_limit, page_array_ptr, page_count, stack_phys, scheduler_current_task(state_ptr))
+    scheduler_set_task(state_ptr, task_id, task_state_runnable(), name_tag, ctx_ptr, stack_base, task_mode_user(), user_cr3, user_base, user_limit, page_array_ptr, page_count, stack_phys, scheduler_current_task(state_ptr), user_heap_base, user_heap_limit, user_heap_break, irq_frame_ptr)
     if task_id >= scheduler_task_count(state_ptr):
         set_scheduler_state_qword(state_ptr, sched_slot_task_count(), task_id + 1)
     scheduler_enqueue_task(state_ptr, task_id)
@@ -926,6 +1028,9 @@ def scheduler_exec_current_task(state_ptr: int, image_ptr: int, image_len: int, 
     user_argc = 0
     user_argv_ptr = 0
     user_envp_ptr = 0
+    user_heap_base = 0
+    user_heap_limit = 0
+    user_heap_break = 0
 
     if scheduler_task_mode(state_ptr, current_task) != task_mode_user():
         return -1
@@ -940,12 +1045,18 @@ def scheduler_exec_current_task(state_ptr: int, image_ptr: int, image_len: int, 
     scheduler_map_user_image_pages(state_ptr, current_task, root_p4, pmm_state, page_array_ptr, page_count, page_flags_ptr)
     user_rip = user_task_region_base(current_task) + elf_user_entry_offset(image_ptr, image_len)
     user_limit = user_task_region_base(current_task) + page_count * user_page_size()
+    user_heap_base = user_task_region_base(current_task) + elf_user_image_page_count(image_ptr, image_len) * user_page_size()
+    user_heap_limit = user_task_stack_base_virt(current_task, page_count)
+    user_heap_break = user_heap_base
     stack_phys = user_page_array_qword(page_array_ptr, page_count, page_count - 1)
 
     set_scheduler_task_qword(scheduler_task_table_ptr(state_ptr), current_task, task_slot_user_page_array_ptr(), page_array_ptr)
     set_scheduler_task_qword(scheduler_task_table_ptr(state_ptr), current_task, task_slot_user_page_count(), page_count)
     set_scheduler_task_qword(scheduler_task_table_ptr(state_ptr), current_task, task_slot_user_limit(), user_limit)
     set_scheduler_task_qword(scheduler_task_table_ptr(state_ptr), current_task, task_slot_user_stack_phys(), stack_phys)
+    set_scheduler_task_qword(scheduler_task_table_ptr(state_ptr), current_task, task_slot_user_heap_base(), user_heap_base)
+    set_scheduler_task_qword(scheduler_task_table_ptr(state_ptr), current_task, task_slot_user_heap_limit(), user_heap_limit)
+    set_scheduler_task_qword(scheduler_task_table_ptr(state_ptr), current_task, task_slot_user_heap_break(), user_heap_break)
     scheduler_replace_current_user_context(state_ptr, current_task, user_rip, user_rsp, user_argc, user_argv_ptr, user_envp_ptr)
     return 0
 
@@ -956,8 +1067,8 @@ def scheduler_init_bootstrap_tasks(state_ptr: int, pmm_state: int, vmm_state: in
     idle_ctx_ptr, idle_stack_base = scheduler_prepare_kernel_task_context(0)
     task1_ctx_ptr, task1_stack_base = scheduler_prepare_kernel_task_context(1)
 
-    scheduler_set_task(state_ptr, 0, task_state_runnable(), 0, idle_ctx_ptr, idle_stack_base, task_mode_kernel(), kernel_cr3, 0, 0, 0, 0, 0, 0)
-    scheduler_set_task(state_ptr, 1, task_state_runnable(), 1, task1_ctx_ptr, task1_stack_base, task_mode_kernel(), kernel_cr3, 0, 0, 0, 0, 0, 0)
+    scheduler_set_task(state_ptr, 0, task_state_runnable(), 0, idle_ctx_ptr, idle_stack_base, task_mode_kernel(), kernel_cr3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    scheduler_set_task(state_ptr, 1, task_state_runnable(), 1, task1_ctx_ptr, task1_stack_base, task_mode_kernel(), kernel_cr3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 
     set_scheduler_state_qword(state_ptr, sched_slot_task_count(), 2)
     set_scheduler_state_qword(state_ptr, sched_slot_current_task(), 1)
@@ -1065,6 +1176,30 @@ def scheduler_yield_current_task(state_ptr: int):
     return scheduler_switch_to_task(state_ptr, old_task, next_task)
 
 
+def scheduler_timer_irq(state_ptr: int, frame_ptr: int, code_segment: int):
+    now = current_kernel_ticks()
+    delta = scheduler_account_tick(state_ptr, now)
+    current_task = scheduler_current_task(state_ptr)
+    next_task = 0
+
+    if delta == 0:
+        return current_task
+    if (code_segment & 0x3) != 0x3:
+        return current_task
+    if scheduler_task_mode(state_ptr, current_task) != task_mode_user():
+        return current_task
+    if scheduler_runnable_count(state_ptr) <= 1:
+        return current_task
+
+    next_task = scheduler_pick_next_task(state_ptr)
+    if next_task == current_task:
+        return current_task
+
+    scheduler_save_user_irq_context(state_ptr, current_task, frame_ptr)
+    scheduler_resume_task_context(state_ptr, next_task)
+    return next_task
+
+
 def scheduler_timer_interrupt(state_ptr: int, allow_preempt: int):
     now = current_kernel_ticks()
     delta = scheduler_account_tick(state_ptr, now)
@@ -1077,11 +1212,53 @@ def scheduler_timer_interrupt(state_ptr: int, allow_preempt: int):
     return scheduler_yield_current_task(state_ptr)
 
 
+def scheduler_reparent_target(state_ptr: int, current_task: int):
+    if current_task != 1 and scheduler_task_count(state_ptr) > 1:
+        return 1
+    return scheduler_idle_task(state_ptr)
+
+
+def scheduler_reparent_children(state_ptr: int, parent_pid: int, new_parent_pid: int):
+    task_id = 0
+    task_table_ptr = scheduler_task_table_ptr(state_ptr)
+    while task_id < scheduler_task_count(state_ptr):
+        if scheduler_task_state(state_ptr, task_id) != task_state_empty():
+            if scheduler_task_parent_pid(state_ptr, task_id) == parent_pid:
+                set_scheduler_task_qword(task_table_ptr, task_id, task_slot_parent_pid(), new_parent_pid)
+        task_id += 1
+
+
+def scheduler_find_child(state_ptr: int, parent_pid: int, require_exited: int):
+    task_id = 0
+    while task_id < scheduler_task_count(state_ptr):
+        if scheduler_task_state(state_ptr, task_id) != task_state_empty():
+            if scheduler_task_parent_pid(state_ptr, task_id) == parent_pid:
+                if require_exited == 0 or scheduler_task_state(state_ptr, task_id) == task_state_exited():
+                    return task_id
+        task_id += 1
+    return -1
+
+
+def scheduler_brk(state_ptr: int, task_id: int, requested: int):
+    heap_base = scheduler_task_user_heap_base(state_ptr, task_id)
+    heap_limit = scheduler_task_user_heap_limit(state_ptr, task_id)
+    current_break = scheduler_task_user_heap_break(state_ptr, task_id)
+    if scheduler_task_mode(state_ptr, task_id) != task_mode_user():
+        return -1
+    if requested == 0:
+        return current_break
+    if requested < heap_base or requested > heap_limit:
+        return -1
+    scheduler_set_task_user_heap_break(state_ptr, task_id, requested)
+    return requested
+
+
 def scheduler_exit_current_task(state_ptr: int, exit_code: int):
     current_task = scheduler_current_task(state_ptr)
     if current_task == scheduler_idle_task(state_ptr):
         panic("cannot exit idle task".c_str())
 
+    scheduler_reparent_children(state_ptr, current_task, scheduler_reparent_target(state_ptr, current_task))
     scheduler_set_task_state(state_ptr, current_task, task_state_exited())
     scheduler_set_task_exit_code(state_ptr, current_task, exit_code)
     next_task = scheduler_pick_next_task(state_ptr)
@@ -1091,21 +1268,30 @@ def scheduler_exit_current_task(state_ptr: int, exit_code: int):
 
 def scheduler_waitpid(state_ptr: int, task_id: int):
     current_task = scheduler_current_task(state_ptr)
-    if task_id < 0 or task_id >= scheduler_task_count(state_ptr):
+    target_task = task_id
+    if task_id < -1 or task_id >= scheduler_task_count(state_ptr):
         return -1
     if task_id == current_task:
         return -1
-    if scheduler_task_state(state_ptr, task_id) == task_state_empty():
-        return -1
-    if scheduler_task_parent_pid(state_ptr, task_id) != current_task:
-        return -1
-
-    while scheduler_task_state(state_ptr, task_id) != task_state_exited():
+    if task_id == -1:
+        if scheduler_find_child(state_ptr, current_task, 0) < 0:
+            return -1
+        target_task = scheduler_find_child(state_ptr, current_task, 1)
+        while target_task < 0:
+            scheduler_yield_current_task(state_ptr)
+            target_task = scheduler_find_child(state_ptr, current_task, 1)
+    else:
+        if scheduler_task_state(state_ptr, task_id) == task_state_empty():
+            return -1
+        if scheduler_task_parent_pid(state_ptr, task_id) != current_task:
+            return -1
+        target_task = task_id
+    while scheduler_task_state(state_ptr, target_task) != task_state_exited():
         scheduler_yield_current_task(state_ptr)
 
-    status = scheduler_task_exit_code(state_ptr, task_id)
-    scheduler_destroy_user_task(state_ptr, task_id)
-    scheduler_release_task_slot(state_ptr, task_id)
+    status = scheduler_task_exit_code(state_ptr, target_task)
+    scheduler_destroy_user_task(state_ptr, target_task)
+    scheduler_release_task_slot(state_ptr, target_task)
     return status
 
 
@@ -1166,10 +1352,10 @@ def scheduler_self_test(state_ptr: int, delta: int):
 
     start = scheduler_total_ticks(state_ptr)
     start_switches = scheduler_switch_count(state_ptr)
-    observed = 0
-    while observed < delta:
-        now = wait_for_tick_edge()
-        observed += scheduler_account_tick(state_ptr, now)
+    observed = start
+    while observed < start + delta:
+        wait_for_tick_edge()
+        observed = scheduler_total_ticks(state_ptr)
         scheduler_pick_next_task(state_ptr)
 
     end = scheduler_total_ticks(state_ptr)

@@ -50,6 +50,7 @@ global trigger_page_fault
 
 extern isr_dispatch
 extern syscall_entry
+extern timer_irq_entry
 
 %macro PUSH_REGS 0
     push r15
@@ -349,6 +350,9 @@ isr32:
     mov dword [rax], 0
 .skip_eoi:
     inc qword [rel timer_irq_count]
+    mov rdi, rsp
+    mov rsi, [rsp + 16 * 8]
+    call timer_irq_entry
     POP_REGS
     iretq
 

@@ -22,6 +22,7 @@ global context_switch_asm
 global restore_task_context_asm
 global get_task_trampoline_addr_asm
 global get_user_task_trampoline_addr_asm
+global get_interrupt_return_trampoline_addr_asm
 global get_user_demo_entry_addr_asm
 global get_user_hello_entry_addr_asm
 global enter_user_mode_asm
@@ -270,6 +271,10 @@ get_user_task_trampoline_addr_asm:
     mov rax, user_task_trampoline_asm
     ret
 
+get_interrupt_return_trampoline_addr_asm:
+    mov rax, interrupt_return_trampoline_asm
+    ret
+
 get_user_demo_entry_addr_asm:
     mov rax, user_demo_entry_asm
     ret
@@ -328,6 +333,25 @@ user_task_trampoline_asm:
     cli
     hlt
     jmp .user_halt
+
+interrupt_return_trampoline_asm:
+    mov rsp, r12
+    pop rax
+    pop rbx
+    pop rcx
+    pop rdx
+    pop rsi
+    pop rdi
+    pop rbp
+    pop r8
+    pop r9
+    pop r10
+    pop r11
+    pop r12
+    pop r13
+    pop r14
+    pop r15
+    iretq
 
 align 4096
 user_demo_entry_asm:

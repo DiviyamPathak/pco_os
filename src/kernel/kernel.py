@@ -1,4 +1,5 @@
 from khal import arch_init
+from khal import get_active_scheduler
 from khal import get_idt_base
 from khal import get_idtr_base
 from khal import serial_init
@@ -22,6 +23,7 @@ from kshell import shell_self_test
 from ksched import dump_scheduler_summary
 from ksched import init_scheduler
 from ksched import scheduler_enter_first_task
+from ksched import scheduler_timer_irq
 from ksched import scheduler_self_test
 from ksyscall import sys_clock_ticks
 from ksyscall import sys_exit
@@ -57,6 +59,14 @@ def isr_dispatch(frame: int, vector: int, error_code: int):
     handle_exception(frame, vector, error_code)
 
 
+@export
+def timer_irq_entry(frame: int, code_segment: int):
+    scheduler_state = get_active_scheduler()
+    if scheduler_state == 0:
+        return
+    scheduler_timer_irq(scheduler_state, frame, code_segment)
+
+
 def idle_task_main():
     while True:
         wait_for_tick_edge()
@@ -69,6 +79,7 @@ def worker_task_one():
     third_child = 0
     fourth_child = 0
     fifth_child = 0
+    sixth_child = 0
     preempt_start = 0
     preempt_mid = 0
     demo_path = alloc_bytes(16)
@@ -77,6 +88,8 @@ def worker_task_one():
     argv_path = alloc_bytes(16)
     hello_path = alloc_bytes(16)
     preempt_path = alloc_bytes(16)
+    heap_path = alloc_bytes(16)
+    orphan_path = alloc_bytes(16)
     spawn_arg = alloc_bytes(16)
     spawn_env = alloc_bytes(16)
     spawn_argv = alloc_bytes(24)
@@ -149,6 +162,28 @@ def worker_task_one():
     store_byte(preempt_path + 10, 112)
     store_byte(preempt_path + 11, 116)
     store_byte(preempt_path + 12, 0)
+    store_byte(heap_path + 0, 47)
+    store_byte(heap_path + 1, 98)
+    store_byte(heap_path + 2, 105)
+    store_byte(heap_path + 3, 110)
+    store_byte(heap_path + 4, 47)
+    store_byte(heap_path + 5, 104)
+    store_byte(heap_path + 6, 101)
+    store_byte(heap_path + 7, 97)
+    store_byte(heap_path + 8, 112)
+    store_byte(heap_path + 9, 0)
+    store_byte(orphan_path + 0, 47)
+    store_byte(orphan_path + 1, 98)
+    store_byte(orphan_path + 2, 105)
+    store_byte(orphan_path + 3, 110)
+    store_byte(orphan_path + 4, 47)
+    store_byte(orphan_path + 5, 111)
+    store_byte(orphan_path + 6, 114)
+    store_byte(orphan_path + 7, 112)
+    store_byte(orphan_path + 8, 104)
+    store_byte(orphan_path + 9, 97)
+    store_byte(orphan_path + 10, 110)
+    store_byte(orphan_path + 11, 0)
     store_byte(spawn_arg + 0, 115)
     store_byte(spawn_arg + 1, 112)
     store_byte(spawn_arg + 2, 97)
@@ -299,6 +334,44 @@ def worker_task_one():
     sys_write("\n".c_str())
     if status != 55:
         panic("preempt slow status mismatch".c_str())
+
+    sixth_child = sys_spawn_exec_ptr(heap_path, 9)
+    sys_write("task1 heap pid=".c_str())
+    sys_write_u64(sixth_child)
+    sys_write("\n".c_str())
+    if sixth_child < 0:
+        panic("exec heap spawn failed".c_str())
+    status = sys_waitpid(sixth_child)
+    sys_write("task1 heap status=".c_str())
+    sys_write_u64(status)
+    sys_write(" ticks=".c_str())
+    sys_write_u64(sys_clock_ticks())
+    sys_write("\n".c_str())
+    if status != 88:
+        panic("heap status mismatch".c_str())
+
+    sixth_child = sys_spawn_exec_ptr(orphan_path, 11)
+    sys_write("task1 orphan pid=".c_str())
+    sys_write_u64(sixth_child)
+    sys_write("\n".c_str())
+    if sixth_child < 0:
+        panic("exec orphan spawn failed".c_str())
+    status = sys_waitpid(sixth_child)
+    sys_write("task1 orphan status=".c_str())
+    sys_write_u64(status)
+    sys_write(" ticks=".c_str())
+    sys_write_u64(sys_clock_ticks())
+    sys_write("\n".c_str())
+    if status != 21:
+        panic("orphan parent status mismatch".c_str())
+    status = sys_waitpid(-1)
+    sys_write("task1 adopted status=".c_str())
+    sys_write_u64(status)
+    sys_write(" ticks=".c_str())
+    sys_write_u64(sys_clock_ticks())
+    sys_write("\n".c_str())
+    if status != 7:
+        panic("orphan adoption status mismatch".c_str())
 
     shell_self_test()
     shell_run()

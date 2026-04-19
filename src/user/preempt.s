@@ -3,16 +3,11 @@ section .text
 global _start
 
 _start:
-    mov eax, 3
-    int 0x80
-    mov r12d, eax
-    add r12d, 4
+    mov ecx, 200000000
 
-.wait_ticks:
-    mov eax, 3
-    int 0x80
-    cmp eax, r12d
-    jl .wait_ticks
+.spin:
+    dec ecx
+    jnz .spin
 
     mov edi, 1
     lea rsi, [rel done_message]
@@ -24,8 +19,8 @@ _start:
     mov eax, 5
     int 0x80
 
-.spin:
-    jmp .spin
+.halt:
+    jmp .halt
 
 section .rodata
 done_message:

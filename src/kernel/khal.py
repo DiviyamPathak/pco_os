@@ -10,6 +10,7 @@ from C import context_switch_asm(int, int)
 from C import restore_task_context_asm(int)
 from C import get_task_trampoline_addr_asm() -> int
 from C import get_user_task_trampoline_addr_asm() -> int
+from C import get_interrupt_return_trampoline_addr_asm() -> int
 from C import get_user_demo_entry_addr_asm() -> int
 from C import get_user_hello_entry_addr_asm() -> int
 from C import enter_user_mode_asm(int, int)
@@ -127,6 +128,10 @@ def task_trampoline_addr():
 
 def user_task_trampoline_addr():
     return get_user_task_trampoline_addr_asm()
+
+
+def interrupt_return_trampoline_addr():
+    return get_interrupt_return_trampoline_addr_asm()
 
 
 def user_demo_entry_addr():

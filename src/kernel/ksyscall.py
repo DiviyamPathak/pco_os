@@ -16,8 +16,12 @@ from ksched import scheduler_task_mode
 from ksched import scheduler_task_parent_pid
 from ksched import scheduler_timer_interrupt
 from ksched import scheduler_task_user_base
+from ksched import scheduler_task_user_heap_base
+from ksched import scheduler_task_user_heap_break
+from ksched import scheduler_task_user_heap_limit
 from ksched import scheduler_task_user_limit
 from ksched import scheduler_vfs_state
+from ksched import scheduler_brk
 from ksched import scheduler_waitpid
 from ksched import scheduler_yield_current_task
 from ksched import task_mode_user
@@ -96,6 +100,10 @@ def syscall_getppid_number():
     return 15
 
 
+def syscall_brk_number():
+    return 16
+
+
 def syscall_exec_max_args():
     return 8
 
@@ -123,6 +131,10 @@ def syscall_return_with_tick(state_ptr: int, allow_preempt: int, result: int):
 def syscall_validate_user_buffer(state_ptr: int, task_id: int, ptr: int, length: int):
     base = scheduler_task_user_base(state_ptr, task_id)
     limit = scheduler_task_user_limit(state_ptr, task_id)
+    heap_base = scheduler_task_user_heap_base(state_ptr, task_id)
+    heap_limit = scheduler_task_user_heap_limit(state_ptr, task_id)
+    heap_break = scheduler_task_user_heap_break(state_ptr, task_id)
+    end = 0
     if base == 0 or limit <= base:
         return False
     if length < 0:
@@ -131,9 +143,24 @@ def syscall_validate_user_buffer(state_ptr: int, task_id: int, ptr: int, length:
         return False
     if ptr < base:
         return False
-    if ptr + length < ptr or ptr + length > limit:
+    end = ptr + length
+    if end < ptr or end > limit:
         return False
-    return True
+    if end <= heap_base:
+        return True
+    if ptr >= heap_limit:
+        return True
+    if ptr >= heap_base and end <= heap_break:
+        return True
+    return False
+
+
+def sys_open_flag_create():
+    return 1
+
+
+def sys_open_flag_trunc():
+    return 2
 
 
 def exec_vec_entry_ptr(vec_ptr: int, index: int):
@@ -488,6 +515,11 @@ def syscall_dispatch(number: int, a0: int, a1: int, a2: int, a3: int, a4: int, a
     if number == syscall_getppid_number():
         return syscall_return_with_tick(state_ptr, user_mode, scheduler_task_parent_pid(state_ptr, current_task))
 
+    if number == syscall_brk_number():
+        if user_mode == 0:
+            return -1
+        return syscall_return_with_tick(state_ptr, user_mode, scheduler_brk(state_ptr, current_task, a0))
+
     if number == syscall_clock_ticks_number():
         return syscall_return_with_tick(state_ptr, user_mode, current_kernel_ticks())
 
@@ -540,6 +572,10 @@ def sys_getpid():
 
 def sys_getppid():
     return invoke_syscall(syscall_getppid_number(), 0, 0, 0, 0, 0)
+
+
+def sys_brk(addr: int):
+    return invoke_syscall(syscall_brk_number(), addr, 0, 0, 0, 0)
 
 
 def sys_clock_ticks():
@@ -637,10 +673,15 @@ def syscall_entry(number: int, a0: int, a1: int, a2: int, a3: int, a4: int):
 def syscall_self_test():
     file_path = alloc_bytes(16)
     dir_path = alloc_bytes(4)
+    tmp_path = alloc_bytes(16)
+    tmp_dir_path = alloc_bytes(8)
+    tmp_msg = alloc_bytes(16)
     buf = alloc_bytes(64)
     stat_buf = alloc_bytes(16)
     file_fd = 0
     dir_fd = 0
+    tmp_fd = 0
+    tmp_dir_fd = 0
     stdin_count = 0
 
     store_byte(file_path + 0, 47)
@@ -656,6 +697,33 @@ def syscall_self_test():
     store_byte(file_path + 10, 0)
     store_byte(dir_path + 0, 47)
     store_byte(dir_path + 1, 0)
+    store_byte(tmp_path + 0, 47)
+    store_byte(tmp_path + 1, 116)
+    store_byte(tmp_path + 2, 109)
+    store_byte(tmp_path + 3, 112)
+    store_byte(tmp_path + 4, 47)
+    store_byte(tmp_path + 5, 115)
+    store_byte(tmp_path + 6, 121)
+    store_byte(tmp_path + 7, 115)
+    store_byte(tmp_path + 8, 46)
+    store_byte(tmp_path + 9, 116)
+    store_byte(tmp_path + 10, 120)
+    store_byte(tmp_path + 11, 116)
+    store_byte(tmp_path + 12, 0)
+    store_byte(tmp_dir_path + 0, 47)
+    store_byte(tmp_dir_path + 1, 116)
+    store_byte(tmp_dir_path + 2, 109)
+    store_byte(tmp_dir_path + 3, 112)
+    store_byte(tmp_dir_path + 4, 0)
+    store_byte(tmp_msg + 0, 116)
+    store_byte(tmp_msg + 1, 109)
+    store_byte(tmp_msg + 2, 112)
+    store_byte(tmp_msg + 3, 102)
+    store_byte(tmp_msg + 4, 115)
+    store_byte(tmp_msg + 5, 45)
+    store_byte(tmp_msg + 6, 111)
+    store_byte(tmp_msg + 7, 107)
+    store_byte(tmp_msg + 8, 0)
 
     sys_write("syscall self-test begin\n".c_str())
     console_write_label_u64("sys.pid=".c_str(), sys_getpid())
@@ -679,6 +747,29 @@ def syscall_self_test():
         sys_write_fd_ptr(1, buf, dir_len)
     console_write("\n".c_str())
     console_write_label_u64("sys.close.dir=".c_str(), sys_close(dir_fd))
+    tmp_fd = sys_open_ptr(tmp_path, 12, sys_open_flag_create() | sys_open_flag_trunc())
+    console_write_label_u64("sys.open.tmp=".c_str(), tmp_fd)
+    console_write_label_u64("sys.write.tmp=".c_str(), sys_write_fd_ptr(tmp_fd, tmp_msg, 8))
+    console_write_label_u64("sys.close.tmp=".c_str(), sys_close(tmp_fd))
+    tmp_fd = sys_open_ptr(tmp_path, 12, 0)
+    console_write_label_u64("sys.reopen.tmp=".c_str(), tmp_fd)
+    console_write_label_u64("sys.read.tmp=".c_str(), sys_read(tmp_fd, buf, 64))
+    console_write("sys.read.tmp.sample=".c_str())
+    sys_write_fd_ptr(1, buf, 8)
+    console_write("\n".c_str())
+    if sys_fstat(tmp_fd, stat_buf) != 0:
+        panic("syscall self-test tmp fstat failed".c_str())
+    console_write_label_u64("sys.tmp.size=".c_str(), load_qword_region(stat_buf, 2, 1))
+    console_write_label_u64("sys.close.tmp2=".c_str(), sys_close(tmp_fd))
+    tmp_dir_fd = sys_open_ptr(tmp_dir_path, 4, 0)
+    console_write_label_u64("sys.open.tmpdir=".c_str(), tmp_dir_fd)
+    dir_len = sys_readdir(tmp_dir_fd, buf, 64)
+    console_write_label_u64("sys.readdir.tmp=".c_str(), dir_len)
+    console_write("sys.readdir.tmp.sample=".c_str())
+    if dir_len > 0:
+        sys_write_fd_ptr(1, buf, dir_len)
+    console_write("\n".c_str())
+    console_write_label_u64("sys.close.tmpdir=".c_str(), sys_close(tmp_dir_fd))
     stdin_count = sys_read(0, buf, 64)
     console_write_label_u64("sys.read.stdin=".c_str(), stdin_count)
     console_write_label_u64("sys.close.bad=".c_str(), sys_close(99))

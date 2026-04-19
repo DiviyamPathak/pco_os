@@ -291,6 +291,39 @@ def copy_page_table(src_ptr: int, dst_ptr: int):
         slot += 1
 
 
+def vmm_create_task_address_space(state_ptr: int, pmm_state: int):
+    p2_count = vmm_state_qword(state_ptr, 3)
+    dst_p4 = pmm_alloc_page(pmm_state)
+    dst_p3 = pmm_alloc_page(pmm_state)
+    table_index = 0
+
+    if dst_p4 == 0 or dst_p3 == 0:
+        panic("vmm task root alloc failed".c_str())
+
+    zero_page(dst_p4)
+    zero_page(dst_p3)
+    set_page_table_qword(dst_p4, 0, dst_p3 | 0x003)
+
+    while table_index < p2_count:
+        dst_p2 = pmm_alloc_page(pmm_state)
+        entry_index = 0
+
+        if dst_p2 == 0:
+            panic("vmm task p2 alloc failed".c_str())
+
+        zero_page(dst_p2)
+        set_page_table_qword(dst_p3, table_index, dst_p2 | 0x003)
+
+        while entry_index < 512:
+            phys = ((table_index * 512) + entry_index) << 21
+            set_page_table_qword(dst_p2, entry_index, phys | 0x083)
+            entry_index += 1
+
+        table_index += 1
+
+    return dst_p4
+
+
 def vmm_clone_kernel_address_space(state_ptr: int, pmm_state: int):
     src_p4 = vmm_state_qword(state_ptr, 1)
     src_p3 = vmm_state_qword(state_ptr, 2)
