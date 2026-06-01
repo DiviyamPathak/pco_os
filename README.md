@@ -1,12 +1,65 @@
 # PCO OS
 
-Small x86_64 OS experiment with:
-- a Python-first kernel written in Codon
-- a UEFI loader in C/assembly
-- low-level arch code in NASM
-- QEMU + OVMF as the main bring-up environment
+PCO/OS is a small x86_64 operating-system project built around a Python-first kernel.
 
-## Layout
+The current system boots through UEFI, hands a structured boot block to the kernel, brings up its own memory management, installs exception and timer paths, mounts an initramfs-backed VFS, runs a tiny syscall layer, loads small ELF user programs, and drops into a serial shell.
+
+## Snapshot
+
+- Kernel logic is written mostly in Codon/Python.
+- Low-level CPU, boot, interrupt, and runtime edges stay in NASM and C.
+- Main boot flow is `OVMF -> BOOTX64.EFI -> KERNEL.ELF -> kernel_main`.
+- QEMU + OVMF is the primary bring-up and test environment.
+- Serial is the primary debug and verification path.
+
+## Current Capabilities
+
+- UEFI boot through a custom EFI loader
+- GRUB fallback boot path
+- Structured `BootInfo` handoff into the kernel
+- Runtime GDT/TSS setup with dedicated double-fault IST
+- IDT installation and exception reporting for `#DE`, `#DF`, `#GP`, and `#PF`
+- Physical page allocator built from the EFI memory map
+- Kernel-owned page tables with early PMM/VMM self-tests
+- Local APIC setup, LAPIC timer probing, live timer IRQ validation, and kernel tick accounting
+- Small scheduler with real context switches
+- `int 0x80` syscall entry path
+- Early descriptor-based file I/O and metadata syscalls
+- Tiny hierarchical VFS with read-only initramfs plus writable tmpfs-backed `/tmp`
+- ELF-backed ring-3 user-task loading from `/bin/*`
+- Tiny serial shell with built-in commands
+
+## Architecture
+
+The project keeps high-level policy in Codon/Python and pushes hardware-facing edges down into low-level code.
+
+- `src/kernel/`
+  - boot orchestration
+  - boot-info parsing
+  - console helpers
+  - exception logic
+  - PMM and VMM
+  - APIC/time helpers
+  - scheduler
+  - syscalls
+  - VFS
+  - shell
+  - ELF user-image loading
+- `src/arch/x86_64/`
+  - long-mode entry
+  - runtime shims
+  - serial I/O
+  - context switching
+  - descriptor-table setup
+  - ISR entry stubs
+  - low-level register and port helpers
+- `src/boot/uefi/`
+  - EFI entry stub
+  - UEFI loader that loads `KERNEL.ELF`, captures the EFI memory map, stages `INITRAMFS.BIN`, fills `BootInfo`, exits boot services, and jumps into the kernel
+- `src/boot/grub/`
+  - fallback GRUB configuration
+
+## Repository Layout
 
 ```text
 src/
@@ -16,12 +69,29 @@ src/
     linker.ld
     runtime.s
   boot/
-    grub/grub.cfg
+    grub/
+      grub.cfg
     uefi/
       efi_entry.S
       efi_loader.c
   kernel/
     kernel.py
+    khal.py
+    kboot.py
+    kconsole.py
+    kelf.py
+    kexceptions.py
+    kidt.py
+    kmemory.py
+    kapic.py
+    ksched.py
+    ksyscall.py
+    ktime.py
+    kvfs.py
+    kshell.py
+    ksupport.py
+  user/
+    *.s
 ```
 
 ## Build
@@ -30,26 +100,23 @@ src/
 make
 ```
 
-This builds the kernel ELF:
+Main build artifact:
+
 - `build/kernel-x86_64.elf`
 
-Targets that need the full boot path build extra artifacts automatically:
-- `make run` or `make debug` also build `build/BOOTX64.EFI`
-- `make run` or `make debug` also build `build/initramfs.bin`
-- `make run` or `make debug` also build `build/pco_os-x86_64-uefi.img`
-- `make run-grub` or `make debug-grub` build `build/pco_os-x86_64.iso`
+Full boot-path targets also build:
+
+- `build/BOOTX64.EFI`
+- `build/initramfs.bin`
+- `build/pco_os-x86_64-uefi.img`
+
+GRUB fallback targets build:
+
+- `build/pco_os-x86_64.iso`
 
 ## Run
 
-Default run path:
-
-```bash
-make run
-```
-
-That boots the UEFI disk image with QEMU + OVMF and is headless by default because `scripts/run-qemu.sh` uses `HEADLESS=1` unless you override it.
-
-Recommended serial smoke test:
+Recommended serial-first smoke test:
 
 ```bash
 HEADLESS=1 make run
@@ -69,84 +136,95 @@ make run-grub
 
 ## Debug
 
+UEFI path:
+
 ```bash
 make debug
 ```
 
-This starts QEMU paused with `-s -S` and attaches GDB against `build/kernel-x86_64.elf`.
-
-GRUB fallback debug path:
+GRUB fallback path:
 
 ```bash
 make debug-grub
 ```
 
-Clean build artifacts:
+Clean artifacts:
 
 ```bash
 make clean
 ```
 
-## What The Makefile Does
+## Build Flow
 
-- `make` compiles `src/kernel/kernel.py` to `build/kernel.ll`, lowers it with `llc`, assembles `boot.s`, `runtime.s`, and `interrupts.s`, then links `build/kernel-x86_64.elf`.
-- `make run` builds the EFI loader from `src/boot/uefi/efi_entry.S` and `src/boot/uefi/efi_loader.c`, stages `BOOTX64.EFI` plus `KERNEL.ELF` into a FAT disk image, then boots it with QEMU + OVMF.
-- `make run` also packs `initramfs/` into `build/initramfs.bin`, stages it as `INITRAMFS.BIN`, and hands it to the kernel through the UEFI boot-info block.
-- `make run` also builds tiny user ELF binaries from `src/user/`, stages them into the initramfs under `/bin/`, packs the result into `build/initramfs.bin`, and hands it to the kernel through the UEFI boot-info block.
-- `make run-grub` stages the kernel ELF into a GRUB ISO and boots the fallback path.
-- `make debug` and `make debug-grub` follow the same image path, then start QEMU in GDB wait mode.
+1. `src/kernel/*.py` is compiled with Codon to LLVM IR.
+2. `build/kernel.ll` is lowered with `llc` to `build/kernel.o`.
+3. `boot.s`, `runtime.s`, and `interrupts.s` are assembled with NASM.
+4. Everything is linked with `src/arch/x86_64/linker.ld` into `build/kernel-x86_64.elf`.
+5. The EFI loader is built from `src/boot/uefi/efi_entry.S` and `src/boot/uefi/efi_loader.c` into `build/BOOTX64.EFI`.
+6. Tiny user ELF binaries from `src/user/` are staged into the initramfs under `/bin/`.
+7. `initramfs/` plus staged user binaries are packed into `build/initramfs.bin`.
+8. `BOOTX64.EFI`, `KERNEL.ELF`, and `INITRAMFS.BIN` are staged into a FAT disk image and booted with QEMU + OVMF.
 
-## Quick Test Loop
-
-```bash
-make
-HEADLESS=1 make run
-```
+## Healthy Boot Output
 
 Current healthy serial output should include lines like:
+
 - `Hello from Codon over serial!`
 - `boot.method=uefi-loader`
 - `pmm self-test ok`
 - `vmm self-test ok`
+- `vfs self-test ok`
 - `lapic timer probe ok`
 - `lapic timer irq ok`
 - `timekeeping self-test ok`
-- `vfs self-test ok`
-- `sys.fstat.size=22`
-- `sys.readdir.sample=bin`
-- `sys.read.tmp.sample=tmpfs-ok`
-- `sys.read.stdin=0`
+- `scheduler self-test ok`
+- `syscall self-test ok`
 - `shell self-test ok`
 - `shell ready`
 - `pco> `
-- `scheduler self-test ok`
-- `sys.close.bad=-1`
-- `syscall self-test ok`
-- `task1 spawned pid=2`
+
+Later parts of the log should also show user-task execution, for example:
+
 - `task1 waitpid=2 status=42`
-- `user syscall exit`
 - `task1 rwtest waitpid=2 status=42`
+- `task1 argv waitpid=2 status=33`
 - `task1 chain waitpid=2 status=33`
 - `task1 heap status=88`
 - `task1 adopted status=7`
 - `task1 preempt fast status=7`
 - `task1 preempt slow status=55`
-- `run pid=2`
-- `run status=33`
 
-## Notes
+## Shell
 
-- The primary x86_64 boot path is UEFI: `OVMF -> BOOTX64.EFI -> KERNEL.ELF -> kernel_main`.
+The current serial shell is intentionally small and bring-up oriented. Built-ins include:
+
+- `help`
+- `pwd`
+- `ppid`
+- `cd`
+- `clear`
+- `ls`
+- `cat`
+- `stat`
+- `write`
+- `ticks`
+- `spawn`
+- `run`
+
+## Design Notes
+
 - Serial is the most reliable early-boot output path.
-- Bootstrap tasks now run with saved task contexts, and the kernel can dynamically spawn, reap, and respawn tiny ring-3 user programs on fresh per-task CR3 roots with a shared private user layout through a user-capable `int 0x80` path.
-- The syscall ABI now has early file-descriptor and filesystem support: tasks start with `stdin/stdout/stderr`, `open/read/write/close` are wired through descriptor objects, and the current syscall self-test now also proves `fstat`-style metadata, `getppid`, plus root-directory `readdir` on the initramfs-backed VFS.
-- `stdin` is now a nonblocking serial-backed descriptor, so `read(fd=0, ...)` is live for interactive bring-up without stalling unattended boots.
-- A tiny serial shell now runs in task 1 after the scheduler/process self-tests, with line buffering, backspace handling, a prompt, and built-in commands for `help`, `pwd`, `ppid`, `cd`, `clear`, `ls`, `cat`, `stat`, `write`, `ticks`, `spawn`, and `run`.
-- The current storage path is a small hierarchical VFS made from a read-only initramfs root plus a writable tmpfs-backed `/tmp`, with a real root directory, nested directories like `/bin` and `/docs`, read-only regular files, mutable tmpfs files, and tiny ELF user binaries.
-- The current exec path is ELF-backed instead of built-in-program-backed: the kernel opens the file from the VFS, validates a tiny ELF64 subset, maps multiple `PT_LOAD` segments with writable data/BSS handling into a ring-3 task, and can either spawn a new task or replace the current user image through the same loader path.
-- Parent-child bookkeeping is now explicit enough for `waitpid` ownership, `waitpid(-1)` adoption/reap behavior, and `getppid`, and both spawned-user and direct user-side `execve(argv, envp)` proof paths now carry `argv/envp` into userspace through the initial task stack and user-entry registers.
-- User tasks now have an explicit heap region inside their private user mapping, and the syscall layer exposes a small `brk`-style interface that `/bin/heap` proves during boot.
-- Timer-driven preemption now includes direct LAPIC IRQ-side rescheduling for user-mode tasks, so a pure userspace busy loop can be preempted without waiting for a syscall or trap return; broader kernel-mode preemption is still not a target yet.
-- Current project notes and handoff state live in:
+- VGA exists as a secondary path, but it is not the source of truth during bring-up.
+- The kernel now owns its own `cr3` and no longer relies on firmware page tables after early bootstrap.
+- The current VM layout is still identity-first. Higher-half cleanup and richer VM policy are future work.
+- The current process/syscall layer is intentionally small and POSIX-ish, not full POSIX.
+- Preemption is working for user-mode tasks via the LAPIC timer path; broader kernel-mode preemption is still not a goal yet.
+
+## Practical Developer Notes
+
+- If the screen looks blank, check serial output first.
+- If a change affects boot, memory, or interrupts, prefer `HEADLESS=1 make run` before anything else.
+- The UEFI path is the primary path. GRUB remains useful as a fallback and debug aid.
+- Deeper project notes live in:
   - `Learning.md`
   - `CurrentContext.md`
